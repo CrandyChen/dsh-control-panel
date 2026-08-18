@@ -1,8 +1,10 @@
 //! 控制面板界面语言的全局设置与后端文案目录。
 //!
 //! - 语言优先级：`config.language`（"auto" / "zh-CN" / "en"）→ 应用启动与保存配置时同步到全局；
-//! - `AppError::friendly()` 与各模块直接返回给前端的错误/提示文案通过本模块输出中 / 英文；
-//! - 技术性日志（git / pnpm 输出、Logger 正文、Step 标题）保持稳定原文，不做翻译。
+//!   "auto" 跟随系统语言（与前端 detectSystemLang 一致）；
+//! - `AppError::friendly()`、各模块返回给前端的错误/提示文案、控制面板自身日志（Logger 正文）
+//!   与步骤标题均按当前语言输出中 / 英文；
+//! - 技术性输出（git / pnpm 等外部命令输出、DSH 进程输出）保持原文，不做翻译。
 
 use std::sync::RwLock;
 
@@ -27,14 +29,19 @@ pub fn get_lang() -> Lang {
     }
 }
 
-/// 从配置的 language 字符串解析（"zh-CN"（含 "zh"）→ Zh，其余含空值 → En）。
+/// 从配置的 language 字符串解析（"zh-CN"（含 "zh"）→ Zh；"auto" 跟随系统语言；
+/// 其余含空值 → En）。系统语言解析失败时回退 En。
 pub fn lang_from_config(s: &str) -> Lang {
     let v = s.trim().to_ascii_lowercase();
     if v == "zh-cn" || v == "zh" {
-        Lang::Zh
-    } else {
-        Lang::En
+        return Lang::Zh;
     }
+    if v == "auto" {
+        // auto：跟随系统语言（与前端 detectSystemLang 的口径一致）。
+        let locale = sys_locale::get_locale().unwrap_or_default().to_ascii_lowercase();
+        return if locale.starts_with("zh") { Lang::Zh } else { Lang::En };
+    }
+    Lang::En
 }
 
 /// 后端文案目录：返回 (中文, English)。未知 key 返回 None（由调用方原样透出）。
@@ -153,6 +160,169 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             " 提示：若本地存在未提交的改动或网络异常，请先手动处理（可在终端中执行 git pull 查看原因），再重试更新。",
             " Tip: if there are uncommitted local changes or a network issue, resolve them first (run `git pull` in a terminal to inspect), then retry the update.",
         ),
+        // ── 卸载预览扫描 ──
+        "uninstall.scan.progress" => (
+            "正在统计 {0}：{1} 项 / {2}",
+            "Scanning {0}: {1} items / {2}",
+        ),
+        "uninstall.scan.cancelled" => (
+            "已取消统计",
+            "Scan cancelled",
+        ),
+        // ── 步骤标题（与前端 i18n.ts 的 step.* 一一对应）──
+        "step.clone" => ("克隆仓库（git clone）", "Clone repository (git clone)"),
+        "step.install" => ("安装依赖（pnpm install）", "Install dependencies (pnpm install)"),
+        "step.build" => ("构建（pnpm run build）", "Build (pnpm run build)"),
+        "step.pull" => ("拉取最新代码（git pull --ff-only）", "Pull latest code (git pull --ff-only)"),
+        "step.web" => ("启动 web 服务（pnpm dsh web）", "Start web service (pnpm dsh web)"),
+        "step.repair-fetch" => ("拉取远程引用（git fetch origin）", "Fetch remote refs (git fetch origin)"),
+        "step.repair-reset" => ("重置到远程默认分支（git reset --hard）", "Reset to remote default branch (git reset --hard)"),
+        "step.repair-clean" => ("清理多余文件（git clean）", "Clean extra files (git clean)"),
+        "step.repair-install" => ("安装依赖（pnpm install）", "Install dependencies (pnpm install)"),
+        "step.repair-build" => ("构建（pnpm run build）", "Build (pnpm run build)"),
+        "step.repair-clean-nm" => ("删除 node_modules（深度重建）", "Delete node_modules (deep rebuild)"),
+        "step.repair-remove" => ("删除损坏的安装目录（保底重装）", "Delete corrupted installation directory (last-resort reinstall)"),
+        "step.repair-clone" => ("重新克隆仓库（git clone）", "Re-clone repository (git clone)"),
+        "step.delete" => ("删除 {0}", "Delete {0}"),
+        // ── 控制面板自身日志（Logger 正文，按界面语言输出）──
+        "log.boot" => ("=== DSH Control Panel v{0} 启动 ===", "=== DSH Control Panel v{0} started ==="),
+        "log.os" => (
+            "操作系统: {0} · 日志文件: {1}",
+            "OS: {0} · log file: {1}",
+        ),
+        "log.exit" => ("=== DSH Control Panel 退出 ===", "=== DSH Control Panel exited ==="),
+        "log.config_loaded" => (
+            "配置加载完成: install_dir={0} auto_check={1} language={2}",
+            "Config loaded: install_dir={0} auto_check={1} language={2}",
+        ),
+        "log.settings_saved" => (
+            "⚙ 保存设置（自动检测 / 间隔 / 语言等）",
+            "⚙ Settings saved (auto-check / interval / language, etc.)",
+        ),
+        "log.picked_dir" => ("📁 选择目录: {0}", "📁 Selected directory: {0}"),
+        "log.detect_state" => (
+            "🔎 状态探测: installed={0} version={1} commit={2} running={3}",
+            "🔎 State probe: installed={0} version={1} commit={2} running={3}",
+        ),
+        "log.tools_summary" => ("🔧 环境检测: {0}", "🔧 Runtime check: {0}"),
+        "log.manual_scan_found" => (
+            "🔎 扫描手动安装: 发现 {0} 个候选",
+            "🔎 Manual install scan: found {0} candidate(s)",
+        ),
+        "log.manual_scan_item" => ("   • {0}", "   • {0}"),
+        "log.adopt_done" => (
+            "✅ 已采用手动安装: {0} (version={1} commit={2})",
+            "✅ Adopted manual installation: {0} (version={1} commit={2})",
+        ),
+        "log.update_check" => (
+            "🔎 检测更新: behind={0} update_available={1} subject={2}",
+            "🔎 Update check: behind={0} update_available={1} subject={2}",
+        ),
+        "log.open_terminal" => ("🖥 打开终端: {0}", "🖥 Opened terminal: {0}"),
+        "log.open_browser" => ("🌐 在系统浏览器打开 {0}", "🌐 Opened {0} in the system browser"),
+        "log.open_external" => ("🔗 打开外部链接: {0}", "🔗 Opened external link: {0}"),
+        "log.dsh_probe_ok" => (
+            "🔌 dsh 命令探测：全局 dsh 可用（插件命令以 dsh 执行）",
+            "🔌 dsh probe: global dsh available (plugin commands run via dsh)",
+        ),
+        "log.dsh_probe_fallback" => (
+            "🔌 dsh 命令探测：全局 dsh 不可用（插件等 dsh 命令将以 pnpm dsh 执行）",
+            "🔌 dsh probe: global dsh unavailable (dsh commands will run via `pnpm dsh`)",
+        ),
+        "log.step_start" => ("▶ {0}: {1} {2}", "▶ {0}: {1} {2}"),
+        "log.step_done" => ("✓ {0} 完成（退出码 {1}）", "✓ {0} finished (exit code {1})"),
+        "log.install_done" => (
+            "✅ 安装完成（目录: {0}）",
+            "✅ Installation complete (directory: {0})",
+        ),
+        "log.update_done" => ("✅ 更新完成", "✅ Update complete"),
+        "log.plugin_op_start" => (
+            "🔌 {0}: {1}（目录 {2}）",
+            "🔌 {0}: {1} (directory {2})",
+        ),
+        "log.uninstall_delete" => ("🗑 删除 {0}", "🗑 Deleting {0}"),
+        "log.uninstall_delete_failed" => (
+            "删除 {0} 失败：{1}。请关闭占用该路径的程序（如终端、编辑器）后重试。",
+            "Failed to delete {0}: {1}. Close programs using this path (e.g. terminal, editor) and retry.",
+        ),
+        "log.uninstall_done" => ("✅ 卸载完成", "✅ Uninstall complete"),
+        "log.repair_start" => ("🛠 修复安装开始…", "🛠 Repair install started…"),
+        "log.repair_done" => ("✅ 修复安装完成", "✅ Repair install complete"),
+        "log.repair_kill_ok" => (
+            "🧹 已清理安装目录相关的残留进程",
+            "🧹 Cleaned up stray processes related to the install directory",
+        ),
+        "log.repair_kill_fail" => (
+            "⚠ 清理残留进程失败（{0}，已跳过，不影响后续步骤）",
+            "⚠ Failed to clean stray processes ({0}; skipped, does not affect later steps)",
+        ),
+        "log.repair_step_done" => ("✓ {0} 完成", "✓ {0} finished"),
+        "log.repair_step_failed" => ("✗ {0} 失败（退出码 {1}）", "✗ {0} failed (exit code {1})"),
+        "log.repair_builds_parse" => (
+            "检测到 pnpm 拦截构建脚本，但无法解析被拦截的包名",
+            "pnpm blocked build scripts, but blocked package names could not be parsed.",
+        ),
+        "log.repair_builds_note1" => (
+            "检测到 pnpm 拦截构建脚本，已将 {0} 加入 allowBuilds 并自动重试",
+            "pnpm blocked build scripts; added {0} to allowBuilds and retried automatically.",
+        ),
+        "log.repair_builds_note2" => (
+            "检测到构建脚本被拦截，但 allowBuilds 已包含相关包，正在重试",
+            "Build scripts are blocked, but the packages are already in allowBuilds; retrying.",
+        ),
+        "log.repair_builds_writefail" => (
+            "写入 allowBuilds 失败：{0}",
+            "Failed to write allowBuilds: {0}",
+        ),
+        "log.repair_deep" => (
+            "🔄 深度重建：删除 node_modules …",
+            "🔄 Deep rebuild: deleting node_modules …",
+        ),
+        "log.repair_profile_fix" => (
+            "🔧 修复 profile「{0}」的依赖状态…",
+            "🔧 Repairing dependencies of profile \"{0}\"…",
+        ),
+        "log.repair_profile_ok" => (
+            "✅ profile「{0}」依赖就绪",
+            "✅ Dependencies of profile \"{0}\" are ready",
+        ),
+        "log.repair_profile_fail" => (
+            "⚠ profile「{0}」依赖安装失败：{1}。可稍后在「插件管理」中重试，或删除该 profile 目录后重新初始化。",
+            "⚠ Failed to install dependencies of profile \"{0}\": {1}. Retry later in \"Plugin Manager\", or delete the profile directory and re-initialize it.",
+        ),
+        "log.repair_last_resort" => (
+            "🗑 保底重装：删除安装目录 {0} …",
+            "🗑 Last-resort reinstall: deleting install directory {0} …",
+        ),
+        "log.repair_locks" => (
+            "🧹 已清理 {0} 个 git 锁 / 中断状态文件",
+            "🧹 Cleaned {0} git lock / interrupted-state file(s)",
+        ),
+        "log.repair_no_locks" => (
+            "🧹 未发现 git 锁或中断状态文件",
+            "🧹 No git locks or interrupted-state files found",
+        ),
+        "log.repair_escalate" => (
+            "🔄 常规修复失败，尝试深度重建（删除 node_modules 后重新安装依赖）…",
+            "🔄 Regular repair failed; trying a deep rebuild (delete node_modules, reinstall dependencies)…",
+        ),
+        "log.repair_last_resort_escalate" => (
+            "⚠ 深度重建仍失败，将执行保底手段：删除安装目录并重新安装（相当于卸载后重装）…",
+            "⚠ Deep rebuild also failed; falling back to deleting the install directory and reinstalling (equivalent to uninstall + reinstall)…",
+        ),
+        "log.web_start" => (
+            "🚀 启动 DeepSeek Harness web 服务（pnpm dsh web）",
+            "🚀 Starting DeepSeek Harness web service (pnpm dsh web)",
+        ),
+        "log.web_pid" => ("进程 PID: {0}", "Process PID: {0}"),
+        "log.web_stop_noop" => (
+            "⏹ 停止 web 服务：未发现运行中的进程",
+            "⏹ Stop web service: no running process found",
+        ),
+        "log.web_stop_killed" => (
+            "⏹ 停止 web 服务：已结束进程 {0}",
+            "⏹ Stop web service: terminated process(es) {0}",
+        ),
         _ => return None,
     })
 }
@@ -184,6 +354,16 @@ pub fn t_fmt(key: &str, args: &[&str]) -> String {
     out
 }
 
+/// 按当前语言取后端文案；目录中不存在该 key 时回退 fallback 原文
+/// （用于步骤标题等：新增步骤暂无翻译时保留原始标题，而不是显示裸 key）。
+pub fn t_or(key: &str, fallback: &str) -> String {
+    if catalog(key).is_some() {
+        t(key)
+    } else {
+        fallback.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +375,20 @@ mod tests {
         assert_eq!(lang_from_config("en"), Lang::En);
         assert_eq!(lang_from_config("fr"), Lang::En);
         assert_eq!(lang_from_config(""), Lang::En);
+        // auto 跟随系统语言：结果为 Zh 或 En 之一（不 panic）。
+        assert!(matches!(lang_from_config("auto"), Lang::Zh | Lang::En));
+    }
+
+    #[test]
+    fn t_or_falls_back_to_fallback_for_unknown_keys() {
+        set_lang(Lang::Zh);
+        // 已知 key：取目录文案。
+        assert_eq!(t_or("step.clone", "克隆仓库（git clone）"), "克隆仓库（git clone）");
+        set_lang(Lang::En);
+        assert_eq!(t_or("step.clone", "克隆仓库（git clone）"), "Clone repository (git clone)");
+        // 未知 key：回退原文，而不是返回裸 key。
+        assert_eq!(t_or("step.brand-new", "某新步骤"), "某新步骤");
+        set_lang(Lang::Zh);
     }
 
     #[test]

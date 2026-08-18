@@ -276,11 +276,24 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     {
       title: t("plugin.col.spec"),
       dataIndex: "spec",
-      render: (v: string) => (
-        <Typography.Text copyable={{ text: v }} style={{ fontFamily: "monospace", fontSize: 12 }}>
-          {v || "—"}
-        </Typography.Text>
-      ),
+      render: (_, record) => {
+        // 优先显示已安装的实际版本（GitHub 安装的插件由此显示真实版本号）；
+        // 版本不可得时回退 spec；tooltip 展示版本与 spec 的完整信息。
+        const display = record.version ?? record.spec;
+        const tip =
+          record.version && record.spec && record.spec !== record.version
+            ? `${record.version} · ${record.spec}`
+            : display;
+        return (
+          <Typography.Text
+            copyable={{ text: display }}
+            style={{ fontFamily: "monospace", fontSize: 12 }}
+            title={tip}
+          >
+            {display || "—"}
+          </Typography.Text>
+        );
+      },
     },
     {
       title: t("plugin.col.action"),

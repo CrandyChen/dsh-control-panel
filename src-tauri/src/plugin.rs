@@ -7,10 +7,10 @@
 //! （dependencies + dsh.profile.bundles），比解析 `pnpm list` 输出更可靠；
 //! github 插件的 remove/update 标识 = 清单里记录的依赖 key，原样复用。
 //!
-//! pnpm ≥10 会拦截 git 托管插件的 prepare 构建脚本；失败重试前自动向该
-//! profile 的 pnpm-workspace.yaml 追加 `allowBuilds: {"*": true}`（与 dsh
-//! 自身报错指引及 DSH 仓库根 workspace 的约定一致），并附带设置
-//! PNPM_ALLOW_BUILDS / npm_config_allow_builds 环境变量双保险。
+//! pnpm ≥10 会拦截依赖构建脚本（含 git 托管插件的 prepare 脚本，报
+//! ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED）；失败重试前自动从输出解析被拦截的
+//! 包（含 pnpm 提示的精确 allowBuilds key），写入该 profile 的
+//! pnpm-workspace.yaml（显式 `包名: true`；实测 `"*": true` 通配不会放行）后重试。
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,9 @@ pub struct PluginEntry {
     pub spec: String,
     /// 是否在 dsh.profile.bundles 激活层栈中（组合包插件）。
     pub is_bundle: bool,
+    /// 已安装的实际版本（读 node_modules/<key>/package.json 的 version；
+    /// 未安装 / 读取失败为 None，GitHub 插件据此显示真实版本号而非 git spec）。
+    pub version: Option<String>,
 }
 
 /// 指定 profile 的插件列表。
@@ -75,6 +78,24 @@ pub struct ParsedAdd {
 }
 
 // ─────────────────────────────── 目录与清单 ───────────────────────────────
+
+/// 读取已安装包的实际版本（`node_modules/<key>/package.json` 的 version 字段）。
+/// pnpm 的 node_modules 下包是符号链接，`read_to_string` 可正常跟随；
+/// 未安装 / 文件缺失 / 解析失败返回 None。
+pub fn installed_version(dir: &Path, key: &str) -> Option<String> {
+    let nm = dir.join("node_modules");
+    let pkg_dir = match key.split_once('/') {
+        // scoped 包：@scope/name → node_modules/@scope/name（scope 已含前导 @）。
+        Some((scope, name)) => nm.join(scope).join(name),
+        None => nm.join(key),
+    };
+    let text = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
 
 /// 校验 profile 名称并返回其目录（`$DSH_HOME/profiles/<name>`），
 /// 规则与 dsh 的 resolveProfileDir 一致。
@@ -117,6 +138,7 @@ pub fn read_plugin_list(dir: &Path, profile: &str, use_pnpm_dsh: bool) -> Plugin
                         key: key.clone(),
                         spec: val.as_str().map(String::from).unwrap_or_default(),
                         is_bundle: bundles.contains(key),
+                        version: installed_version(dir, key),
                     });
                 }
             }
@@ -393,6 +415,7 @@ pub fn is_build_blocked(output: &str) -> bool {
     l.contains("allowbuilds")
         || l.contains("allow-builds")
         || l.contains("err_pnpm_ignored_builds")
+        || l.contains("err_pnpm_git_dep_prepare_not_allowed")
         || l.contains("ignored build")
         || (l.contains("prepare") && l.contains("blocked"))
         || (l.contains("build script") && l.contains("blocked"))
@@ -436,6 +459,103 @@ pub fn parse_ignored_build_packages(output: &str) -> Vec<String> {
     packages
 }
 
+/// 在 output 中查找 `marker` 之后第一个引号包裹的片段（marker 以 `"` 结尾，
+/// 如 `fetched from "` / `The git-hosted package "`），找不到返回 None。
+fn find_quoted<'a>(output: &'a str, marker: &str) -> Option<&'a str> {
+    let start = output.find(marker)? + marker.len();
+    let rest = &output[start..];
+    let end = rest.find('"')?;
+    let s = &rest[..end];
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 向 key 列表追加去重后的条目；跳过通配 `"*"` / `*`（无实际放行作用）。
+fn push_allow_key(keys: &mut Vec<String>, k: &str) {
+    let k = k.trim();
+    if k.is_empty() || k == "*" || k == "\"*\"" || k == "'*'" {
+        return;
+    }
+    if !keys.iter().any(|x| x == k) {
+        keys.push(k.to_string());
+    }
+}
+
+/// 从 pnpm 的 git 托管依赖拦截错误（ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED）中
+/// 提取 pnpm 提示要写入 allowBuilds 的**精确 key**，形如
+/// `dsh-better-sidebar@https://codeload.github.com/…/tar.gz/<sha>`（含包名与
+/// 解析出的 tarball URL，含 commit 哈希；必须原样写入才会被 pnpm 放行）。
+///
+/// 主解析：示例块（`allowBuilds:` 后缩进的 `key: true` 行，兼容引号形式）；
+/// 兜底解析：错误头里的 `fetched from "URL"` + `The git-hosted package "NAME@VERSION"`，
+/// 拼成 `NAME@URL`。通配 `"*"` / `*` 无实际作用，跳过；结果去重、保持顺序。
+pub fn parse_git_prepare_keys(output: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+
+    // 主解析：`allowBuilds:` 示例块（可能有多块，全部收集）。
+    let lines: Vec<&str> = output.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if t == "allowBuilds" || t == "allowBuilds:" || t == "allowBuilds :" {
+            i += 1;
+            while i < lines.len() {
+                let line = lines[i];
+                if line.trim().is_empty() || !(line.starts_with(' ') || line.starts_with('\t')) {
+                    break;
+                }
+                let trimmed = line.trim();
+                if let Some(key) = trimmed.strip_suffix(": true") {
+                    let key = key.trim();
+                    // 兼容带引号的 key：`"a@url": true`。
+                    let key = if (key.starts_with('"') && key.ends_with('"') && key.len() >= 2)
+                        || (key.starts_with('\'') && key.ends_with('\'') && key.len() >= 2)
+                    {
+                        &key[1..key.len() - 1]
+                    } else {
+                        key
+                    };
+                    push_allow_key(&mut keys, key);
+                }
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+
+    // 兜底解析：错误头。
+    if keys.is_empty() {
+        if let (Some(url), Some(pkg)) =
+            (find_quoted(output, "fetched from \""), find_quoted(output, "package \""))
+        {
+            // pkg 形如 name@version；取最后一个 @ 之前为包名（scoped 包首字符 @ 不算分隔符）。
+            let name = match pkg.rfind('@') {
+                Some(0) => pkg,
+                Some(idx) => &pkg[..idx],
+                None => pkg,
+            };
+            if !name.is_empty() && !url.is_empty() {
+                push_allow_key(&mut keys, &format!("{name}@{url}"));
+            }
+        }
+    }
+
+    keys
+}
+
+/// 合并解析「被忽略的构建脚本包名」与「git 托管依赖 allowBuilds key」，去重保序。
+pub fn parse_blocked_packages(output: &str) -> Vec<String> {
+    let mut out = parse_ignored_build_packages(output);
+    for k in parse_git_prepare_keys(output) {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
+}
 /// 确保 profile 的 pnpm-workspace.yaml 的 allowBuilds 中，指定包为显式 `true`。
 ///
 /// pnpm（实测 11.x）并不会因为 `allowBuilds: {"*": true}` 通配而放行构建，
@@ -674,15 +794,18 @@ pub fn run_plugin_op(
     let pdir = profile_dir(profile)?;
 
     let display = format!("dsh plugin --profile {profile} {}", args.join(" "));
-    logger.info(&format!("🔌 {action_label}: {display}（目录 {install_dir}）"));
+    logger.info(&crate::i18n::t_fmt(
+        "log.plugin_op_start",
+        &[&action_label, &display, &install_dir],
+    ));
 
     let mut use_pnpm = cfg.use_pnpm_dsh;
-    let mut bypass_builds = false;
+    let mut bypass_builds: u8 = 0;
     let mut attempt = 0;
     loop {
         attempt += 1;
         let step_id = format!("plugin-{attempt}");
-        let title = format!("{action_label}（{display}）");
+        let title = format!("{action_label} ({display})");
         let _ = channel.send(PipelineEvent::StepStarted {
             id: step_id.clone(),
             title: title.clone(),
@@ -751,10 +874,12 @@ pub fn run_plugin_op(
             continue;
         }
         // 失败 2：pnpm 拦截构建脚本 → 把被拦截的包显式加入 allowBuilds 后重试。
-        // （实测 pnpm 不会因 `"*": true` 通配放行，必须显式 `包名: true`。）
-        if !bypass_builds && is_build_blocked(&outcome.output) {
-            bypass_builds = true;
-            let packages = parse_ignored_build_packages(&outcome.output);
+        // （实测 pnpm 不会因 `"*": true` 通配放行，必须显式 `包名: true`；
+        // git 托管插件报 ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED，key 含解析出的
+        // tarball URL，需原样写入。最多自动放行两次，避免死循环。）
+        if bypass_builds < 2 && is_build_blocked(&outcome.output) {
+            bypass_builds += 1;
+            let packages = parse_blocked_packages(&outcome.output);
             if packages.is_empty() {
                 logger.warn(&crate::i18n::t("plugin.op.builds.parse"));
             } else {
@@ -781,14 +906,26 @@ pub fn run_plugin_op(
             }
         }
 
-        // 最终失败：摘录尾部输出作为友好提示。
+        // 最终失败：摘录最有信息量的输出行作为友好提示（优先 pnpm 的 ERR 行，
+        // 避免摘到无意义的 `[ELIFECYCLE] Command failed with exit code 1.`）。
         let no_output = crate::i18n::t("plugin.op.no.output");
-        let last = outcome
+        let pick = outcome
             .output
             .lines()
+            .filter(|l| !l.trim().is_empty())
             .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or(&no_output);
+            .find(|l| {
+                let t = l.trim();
+                t.starts_with("[ERR_PNPM") || t.contains("ERR_PNPM_")
+            })
+            .or_else(|| {
+                outcome
+                    .output
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+            });
+        let last = pick.unwrap_or(&no_output).trim();
         let last = if last.chars().count() > 200 {
             let s: String = last.chars().take(200).collect();
             format!("{s}…")
@@ -865,6 +1002,72 @@ mod tests {
         // 内置组合包：在 bundles 中但不在 dependencies。
         assert_eq!(list.builtin_bundles, vec!["@deepseek-ai/dsh-base"]);
         assert_eq!(list.use_pnpm_dsh, true);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- 已安装版本 ----------
+
+    #[test]
+    fn installed_version_reads_package_json() {
+        let dir = tmp_dir("ver1");
+        // 普通包 + scoped 包。
+        std::fs::create_dir_all(dir.join("node_modules/dsh-better-sidebar")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/@scope/name")).unwrap();
+        std::fs::write(
+            dir.join("node_modules/dsh-better-sidebar/package.json"),
+            r#"{"name":"dsh-better-sidebar","version":"0.13.1"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("node_modules/@scope/name/package.json"),
+            r#"{"name":"@scope/name","version":"2.3.4"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            installed_version(&dir, "dsh-better-sidebar").as_deref(),
+            Some("0.13.1")
+        );
+        assert_eq!(installed_version(&dir, "@scope/name").as_deref(), Some("2.3.4"));
+        // 未安装 / 缺失 / 解析失败 → None。
+        assert_eq!(installed_version(&dir, "not-installed"), None);
+        std::fs::write(
+            dir.join("node_modules/@scope/name/package.json"),
+            "not json",
+        )
+        .unwrap();
+        assert_eq!(installed_version(&dir, "@scope/name"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_plugin_list_fills_installed_version() {
+        let dir = tmp_dir("ver2");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/github-plugin")).unwrap();
+        std::fs::write(
+            dir.join("node_modules/github-plugin/package.json"),
+            r#"{"name":"github-plugin","version":"0.13.1"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": {
+    "github-plugin": "github:omdsh-dev/dsh-better-sidebar",
+    "plain-lib": "1.0.0"
+  }
+}"#,
+        )
+        .unwrap();
+        let list = read_plugin_list(&dir, "web", true);
+        let gp = list.entries.iter().find(|e| e.key == "github-plugin").unwrap();
+        assert_eq!(gp.spec, "github:omdsh-dev/dsh-better-sidebar");
+        assert_eq!(gp.version.as_deref(), Some("0.13.1"));
+        // 未安装的依赖：version 为 None（前端回退显示 spec）。
+        let plain = list.entries.iter().find(|e| e.key == "plain-lib").unwrap();
+        assert_eq!(plain.version, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1012,11 +1215,68 @@ mod tests {
         assert!(is_build_blocked("add the exact key pnpm printed above under allowBuilds"));
         assert!(is_build_blocked("build script of \"x\" is blocked until allowed"));
         assert!(is_build_blocked("prepare script of github:... was blocked"));
+        assert!(is_build_blocked("[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] ..."));
         assert!(!is_build_blocked("pnpm install completed"));
         assert!(!is_build_blocked(""));
     }
 
-    // ---------- 构建拦截绕过 ----------
+    // ---------- git 托管插件 allowBuilds key 解析 ----------
+
+    #[test]
+    fn git_prepare_keys_extracts_example_block() {
+        // 用户实际日志：pnpm 提示按示例块原样写入 allowBuilds。
+        let out = "[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] Failed to prepare git-hosted package fetched from \"https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/b5e8665499116778fcdd0bbad2f12d7df28664d3\": The git-hosted package \"dsh-better-sidebar@0.13.0\" needs to execute build scripts but is not in the \"allowBuilds\" allowlist.\n\nThis error happened while installing a direct dependency of C:\\Users\\crandy\\.dsh\\profiles\\web\n\nAdd the package to \"allowBuilds\" in your project's pnpm-workspace.yaml to allow it to run scripts. For example:\nallowBuilds:\n  dsh-better-sidebar@https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/b5e8665499116778fcdd0bbad2f12d7df28664d3: true\n";
+        assert_eq!(
+            parse_git_prepare_keys(out),
+            vec!["dsh-better-sidebar@https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/b5e8665499116778fcdd0bbad2f12d7df28664d3"]
+        );
+    }
+
+    #[test]
+    fn git_prepare_keys_falls_back_to_error_header() {
+        // 无示例块时，从错误头（fetched from URL + package NAME@VERSION）拼 key。
+        let out = "[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] Failed to prepare git-hosted package fetched from \"https://codeload.github.com/a/b/tar.gz/abc123\": The git-hosted package \"b@1.2.3\" needs to execute build scripts but is not in the \"allowBuilds\" allowlist.";
+        assert_eq!(parse_git_prepare_keys(out), vec!["b@https://codeload.github.com/a/b/tar.gz/abc123"]);
+        // 无任何匹配 → 空。
+        assert!(parse_git_prepare_keys("pnpm install completed").is_empty());
+        assert!(parse_git_prepare_keys("").is_empty());
+    }
+
+    #[test]
+    fn git_prepare_keys_handles_quotes_wildcard_and_dedupes() {
+        // 引号 key 剥离引号；`"*"` 通配跳过；重复 key 去重；多块收集。
+        let out = "allowBuilds:\n  \"*\": true\n  \"a@https://x/y/tar.gz/1\": true\n  a@https://x/y/tar.gz/1: true\n\nallowBuilds:\n  b@https://z/tar.gz/2: true\n";
+        assert_eq!(
+            parse_git_prepare_keys(out),
+            vec!["a@https://x/y/tar.gz/1", "b@https://z/tar.gz/2"]
+        );
+    }
+
+    #[test]
+    fn parse_blocked_packages_merges_ignored_and_git_keys() {
+        let out = "[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: ssh2@1.0.0, cpu-features@0.0.9\nFor example:\nallowBuilds:\n  dsh-x@https://codeload.github.com/a/b/tar.gz/sha1: true\n";
+        assert_eq!(
+            parse_blocked_packages(out),
+            vec!["ssh2", "cpu-features", "dsh-x@https://codeload.github.com/a/b/tar.gz/sha1"]
+        );
+        // 仅 git 场景。
+        let git_only = "[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] Failed to prepare git-hosted package fetched from \"https://codeload.github.com/x/y/tar.gz/zz\": The git-hosted package \"y@0.1.0\" needs to execute build scripts but is not in the \"allowBuilds\" allowlist.";
+        assert_eq!(parse_blocked_packages(git_only), vec!["y@https://codeload.github.com/x/y/tar.gz/zz"]);
+    }
+
+    #[test]
+    fn ensure_allow_builds_writes_git_key_verbatim() {
+        // git 托管插件的 allowBuilds key 含 @ 与 ://，必须原样写入且幂等。
+        let dir = tmp_dir("builds-git");
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = "dsh-better-sidebar@https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/b5e8665499116778fcdd0bbad2f12d7df28664d3";
+        assert_eq!(ensure_allow_builds(&dir, &[key]).unwrap(), true);
+        let content = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
+        assert!(content.contains(&format!("  {key}: true")), "{content}");
+        // 幂等：第二次调用不再修改。
+        assert_eq!(ensure_allow_builds(&dir, &[key]).unwrap(), false);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn parse_ignored_build_packages_extracts_names() {

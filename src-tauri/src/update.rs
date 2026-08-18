@@ -67,7 +67,8 @@ pub fn update(
         Err(e) => {
             let mut msg = e.friendly();
             if let AppError::StepFailed { step, .. } = &e {
-                if step.contains("拉取") {
+                // 步骤标题已本地化：中英文均内嵌 `git pull` 命令串，据此判断拉取步骤。
+                if step.contains("git pull") {
                     msg.push_str(&crate::i18n::t("update.pull.hint"));
                 }
             }
@@ -84,6 +85,6 @@ pub fn update(
     cfg.latest_subject = None;
     config::save_config(app, &cfg).map_err(|e| e)?;
 
-    logger.info("✅ 更新完成");
+    logger.info(&crate::i18n::t("log.update_done"));
     Ok(())
 }

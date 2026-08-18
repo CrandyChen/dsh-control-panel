@@ -93,11 +93,11 @@ pub fn run_pipeline(
             id: step.id.into(),
             title: step.title.into(),
         });
-        logger.info(&format!(
-            "▶ {}: {} {}",
-            step.title,
-            step.program,
-            step.args.join(" ")
+        // 日志按界面语言输出（步骤标题本地化，未知步骤回退原文）。
+        let title = crate::i18n::t_or(&format!("step.{}", step.id), step.title);
+        logger.info(&crate::i18n::t_fmt(
+            "log.step_start",
+            &[&title, step.program, &step.args.join(" ")],
         ));
 
         let mut child = match spawn_any(&[step.program], &step.args, step.cwd.as_ref(), &step.envs)
@@ -144,15 +144,19 @@ pub fn run_pipeline(
 
         let status = child.wait()?;
         let exit_code = status.code().unwrap_or(-1);
-        logger.info(&format!("✓ {} 完成（退出码 {exit_code}）", step.title));
+        logger.info(&crate::i18n::t_fmt(
+            "log.step_done",
+            &[&title, &exit_code.to_string()],
+        ));
         let _ = channel.send(PipelineEvent::StepFinished {
             id: step.id.into(),
             exit_code,
         });
 
         if !status.success() {
+            // StepFailed 的 step 用本地化标题，保证英文错误文案不混杂中文。
             let err = AppError::StepFailed {
-                step: step.title.to_string(),
+                step: title,
                 exit_code,
             };
             let msg = err.friendly();

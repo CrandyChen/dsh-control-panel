@@ -79,7 +79,7 @@ pub fn install(
     cfg.latest_subject = None;
     config::save_config(app, &cfg).map_err(|e| e)?;
 
-    logger.info(&format!("✅ 安装完成（目录: {target_str}）"));
+    logger.info(&crate::i18n::t_fmt("log.install_done", &[&target_str]));
     Ok(())
 }
 

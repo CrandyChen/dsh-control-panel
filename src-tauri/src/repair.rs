@@ -90,8 +90,8 @@ Get-CimInstance Win32_Process | Where-Object {
     )
     .output();
     match result {
-        Ok(_) => logger.info("🧹 已清理安装目录相关的残留进程"),
-        Err(e) => logger.warn(&format!("⚠ 清理残留进程失败（{e}，已跳过，不影响后续步骤）")),
+        Ok(_) => logger.info(&crate::i18n::t("log.repair_kill_ok")),
+        Err(e) => logger.warn(&crate::i18n::t_fmt("log.repair_kill_fail", &[&e.to_string()])),
     }
 }
 
@@ -115,16 +115,24 @@ fn run_step(
         id: step_id.into(),
         title: title.into(),
     });
-    logger.info(&format!("▶ {title}: {} {}", programs[0], argv.join(" ")));
+    // 日志按界面语言输出（步骤标题本地化，未知步骤回退原文）。
+    let title = crate::i18n::t_or(&format!("step.{step_id}"), title);
+    logger.info(&crate::i18n::t_fmt(
+        "log.step_start",
+        &[&title, programs[0], &argv.join(" ")],
+    ));
     let outcome = plugin::run_capture(programs, argv, cwd, envs, step_id, channel)?;
     let _ = channel.send(PipelineEvent::StepFinished {
         id: step_id.into(),
         exit_code: outcome.exit_code,
     });
     if outcome.ok {
-        logger.info(&format!("✓ {title} 完成"));
+        logger.info(&crate::i18n::t_fmt("log.repair_step_done", &[&title]));
     } else {
-        logger.error(&format!("✗ {title} 失败（退出码 {}）", outcome.exit_code));
+        logger.error(&crate::i18n::t_fmt(
+            "log.repair_step_failed",
+            &[&title, &outcome.exit_code.to_string()],
+        ));
     }
     Ok(outcome)
 }
@@ -206,18 +214,19 @@ fn install_and_build(
         channel,
         logger,
     )?;
-    // pnpm 拦截依赖构建脚本时，显式放行后重试一次（与插件管理的处理一致）。
+    // pnpm 拦截依赖构建脚本时，显式放行后重试一次（与插件管理的处理一致，
+    // 兼容 git 托管依赖的 ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED）。
     if !install.ok && plugin::is_build_blocked(&install.output) {
-        let packages = plugin::parse_ignored_build_packages(&install.output);
+        let packages = plugin::parse_blocked_packages(&install.output);
         if packages.is_empty() {
-            logger.warn("检测到 pnpm 拦截构建脚本，但无法解析被拦截的包名");
+            logger.warn(&crate::i18n::t("log.repair_builds_parse"));
         } else {
             let names: Vec<&str> = packages.iter().map(String::as_str).collect();
             match plugin::ensure_allow_builds(dir, &names) {
                 Ok(true) => {
-                    logger.warn(&format!(
-                        "检测到 pnpm 拦截构建脚本，已将 {} 加入 allowBuilds 并自动重试",
-                        packages.join("、")
+                    logger.warn(&crate::i18n::t_fmt(
+                        "log.repair_builds_note1",
+                        &[&packages.join("、")],
                     ));
                     install = run_step(
                         "repair-install",
@@ -230,8 +239,11 @@ fn install_and_build(
                         logger,
                     )?;
                 }
-                Ok(false) => logger.warn("检测到构建脚本被拦截，但 allowBuilds 已包含相关包，正在重试"),
-                Err(e) => logger.warn(&format!("写入 allowBuilds 失败：{e}")),
+                Ok(false) => logger.warn(&crate::i18n::t("log.repair_builds_note2")),
+                Err(e) => logger.warn(&crate::i18n::t_fmt(
+                    "log.repair_builds_writefail",
+                    &[&e],
+                )),
             }
         }
     }
@@ -264,7 +276,7 @@ fn deep_rebuild(
         id: "repair-clean-nm".into(),
         title: "删除 node_modules（深度重建）".into(),
     });
-    logger.warn("🔄 深度重建：删除 node_modules …");
+    logger.warn(&crate::i18n::t("log.repair_deep"));
     let nm = dir.join("node_modules");
     if nm.exists() {
         std::fs::remove_dir_all(&nm)
@@ -293,7 +305,7 @@ fn repair_profiles(app: &AppHandle, channel: &Channel<PipelineEvent>, logger: &L
             continue;
         }
         let name = e.file_name().to_string_lossy().to_string();
-        logger.info(&format!("🔧 修复 profile「{name}」的依赖状态…"));
+        logger.info(&crate::i18n::t_fmt("log.repair_profile_fix", &[&name]));
         match plugin::run_plugin_op(
             app,
             &name,
@@ -303,9 +315,10 @@ fn repair_profiles(app: &AppHandle, channel: &Channel<PipelineEvent>, logger: &L
             channel,
             logger,
         ) {
-            Ok(_) => logger.info(&format!("✅ profile「{name}」依赖就绪")),
-            Err(e) => logger.warn(&format!(
-                "⚠ profile「{name}」依赖安装失败：{e}。可稍后在「插件管理」中重试，或删除该 profile 目录后重新初始化。"
+            Ok(_) => logger.info(&crate::i18n::t_fmt("log.repair_profile_ok", &[&name])),
+            Err(e) => logger.warn(&crate::i18n::t_fmt(
+                "log.repair_profile_fail",
+                &[&name, &e],
             )),
         }
     }
@@ -328,7 +341,7 @@ fn reinstall(
         id: "repair-remove".into(),
         title: "删除损坏的安装目录（保底重装）".into(),
     });
-    logger.warn(&format!("🗑 保底重装：删除安装目录 {dir} …"));
+    logger.warn(&crate::i18n::t_fmt("log.repair_last_resort", &[dir]));
     if path.exists() {
         std::fs::remove_dir_all(path).map_err(|e| {
             crate::i18n::t_fmt("repair.dir.delete.failed", &[&e.to_string()])
@@ -384,7 +397,7 @@ pub fn repair(
     }
 
     // L1：清理异常状态。
-    logger.info("🛠 修复安装开始…");
+    logger.info(&crate::i18n::t("log.repair_start"));
     let _ = crate::web::stop_web(app);
     kill_stray_processes(&dir, logger);
     let locks = git_lock_files(&path);
@@ -396,22 +409,25 @@ pub fn repair(
                 std::fs::remove_file(l)
             };
         }
-        logger.info(&format!("🧹 已清理 {} 个 git 锁 / 中断状态文件", locks.len()));
+        logger.info(&crate::i18n::t_fmt(
+            "log.repair_locks",
+            &[&locks.len().to_string()],
+        ));
     } else {
-        logger.info("🧹 未发现 git 锁或中断状态文件");
+        logger.info(&crate::i18n::t("log.repair_no_locks"));
     }
 
     // L2 → L3 重建（失败逐级升级）。
     let rebuilt = if try_rebuild(&path, channel, logger).is_ok() {
         true
     } else {
-        logger.warn("🔄 常规修复失败，尝试深度重建（删除 node_modules 后重新安装依赖）…");
+        logger.warn(&crate::i18n::t("log.repair_escalate"));
         deep_rebuild(&path, channel, logger).is_ok()
     };
 
     // L5 保底重装（前两级都失败才触发）。
     if !rebuilt {
-        logger.error("⚠ 深度重建仍失败，将执行保底手段：删除安装目录并重新安装（相当于卸载后重装）…");
+        logger.error(&crate::i18n::t("log.repair_last_resort_escalate"));
         reinstall(&dir, &path, channel, logger)?;
     }
 
@@ -429,7 +445,7 @@ pub fn repair(
     config::save_config(app, &cfg).map_err(|e| e)?;
 
     let _ = channel.send(PipelineEvent::Finished { ok: true });
-    logger.info("✅ 修复安装完成");
+    logger.info(&crate::i18n::t("log.repair_done"));
     Ok(())
 }
 

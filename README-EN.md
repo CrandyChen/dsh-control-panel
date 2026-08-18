@@ -54,13 +54,13 @@ The control panel automatically detects the above environment on launch. If anyt
 - **Wrapped commands**: `git fetch` → `git reset --hard origin/<branch>` → `git clean -fdx` → `pnpm install` → `pnpm run build` (deep repair: delete `node_modules`; fallback: full re-clone).
 
 ### 5. DSH Plugin Management
-- **Description**: Graphically install / update / uninstall DSH profile plugins (`dsh plugin`): smart input (npm package name, `github:owner/repo[#ref]`, GitHub URL, or full command), multi-select / one-click uninstall, isolated per-profile; automatically handles two common pnpm issues (build scripts blocked → auto-writes allowBuilds; global `dsh` unavailable → auto-falls back to `pnpm dsh`).
+- **Description**: Graphically install / update / uninstall DSH profile plugins (`dsh plugin`): smart input (npm package name, `github:owner/repo[#ref]`, GitHub URL, or full command), multi-select / one-click uninstall, isolated per-profile; automatically handles common pnpm issues (build scripts blocked — including the `prepare` script of git-hosted plugins, `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` → auto-parses and writes allowBuilds, then retries; global `dsh` unavailable → auto-falls back to `pnpm dsh`).
 - **Usage**: Open "Plugin Manager"; while the web service is running, **only new plugins can be installed** (update / uninstall are disabled — stop the service first). After installation, a prompt to restart DSH to activate plugins is shown.
 - **Wrapped commands**: `dsh plugin --profile <name> add|update|remove <identifier...>`.
 
 ### 6. DSH Uninstall
 - **Description**: Completely removes DeepSeek Harness.
-- **Usage**: Click "Uninstall" and confirm the items to remove — **installation directory** and **DSH user data directory**.
+- **Usage**: Click "Uninstall" and confirm the items to remove — **installation directory** and **DSH user data directory**. Live progress is shown while sizes / file counts are being calculated (cancellable), so the UI never appears frozen.
 - **Wrapped commands**: None (direct directory deletion with safety guards).
 
 ### 7. Other Tools

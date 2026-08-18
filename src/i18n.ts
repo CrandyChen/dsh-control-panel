@@ -150,6 +150,7 @@ const zh: Dict = {
   "uninstall.cancel": "取消",
   "uninstall.delete": "删除所选 {0} 项",
   "uninstall.deleting": "正在卸载…",
+  "uninstall.scanning": "正在计算卸载内容…",
   "uninstall.alert.title": "此操作不可恢复！",
   "uninstall.alert.desc":
     "将永久删除下方勾选的内容（含技能、配置、凭据、会话记录、Agent 预设等）。请确认不再需要后再继续。",
@@ -438,6 +439,7 @@ const en: Dict = {
   "uninstall.cancel": "Cancel",
   "uninstall.delete": "Delete {0} selected items",
   "uninstall.deleting": "Uninstalling…",
+  "uninstall.scanning": "Calculating uninstall contents…",
   "uninstall.alert.title": "This action cannot be undone!",
   "uninstall.alert.desc":
     "The checked items below will be permanently deleted (including skills, settings, credentials, session history, agent presets, etc.). Continue only if you no longer need them.",

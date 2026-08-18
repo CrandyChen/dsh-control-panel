@@ -24,7 +24,8 @@ mod version;
 mod web;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
@@ -36,10 +37,12 @@ use process::PipelineEvent;
 use uninstall::UninstallPreview;
 use version::UpdateCheckResult;
 
-/// 全局状态：web 服务 PID + 日志器。
+/// 全局状态：web 服务 PID + 日志器 + 卸载预览扫描取消标志。
 pub struct AppState {
     pub web_pid: Mutex<Option<u32>>,
     pub logger: Logger,
+    /// 卸载预览扫描的取消标志（`uninstall_preview` 运行期间存在，取消后清空）。
+    pub preview_cancel: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 // ─────────────────────────────── 命令 ───────────────────────────────
@@ -55,7 +58,7 @@ fn save_config(app: AppHandle, cfg: AppConfig) -> Result<(), String> {
     // 同步界面语言到全局（错误提示等后端文案按当前语言输出）。
     i18n::set_lang(i18n::lang_from_config(&cfg.language));
     config::save_config(&app, &cfg)?;
-    logger.info("⚙ 保存设置（自动检测 / 间隔 / 语言等）");
+    logger.info(&crate::i18n::t("log.settings_saved"));
     Ok(())
 }
 
@@ -70,7 +73,7 @@ fn pick_directory(app: AppHandle) -> Option<String> {
         .and_then(|f| f.into_path().ok())
         .map(|p| p.to_string_lossy().to_string());
     if let Some(p) = &picked {
-        logger.info(&format!("📁 选择目录: {p}"));
+        logger.info(&crate::i18n::t_fmt("log.picked_dir", &[p]));
     }
     picked
 }
@@ -82,12 +85,19 @@ async fn detect_state(app: AppHandle) -> DetectResult {
         let cfg = config::load_config(&app);
         let result = detect::detect_state(cfg.install_dir.as_deref());
         // 版本与 commit 均由 detect_state 实时读取（config 中可能因手动 git pull 而陈旧）。
-        logger.info(&format!(
-            "🔎 状态探测: installed={} version={} commit={} running={}",
-            result.installed,
-            result.version.as_deref().unwrap_or("—"),
-            result.installed_commit.as_deref().map(|c| &c[..c.len().min(7)]).unwrap_or("—"),
-            result.running
+        let commit = result
+            .installed_commit
+            .as_deref()
+            .map(|c| c.chars().take(7).collect::<String>())
+            .unwrap_or_else(|| "—".to_string());
+        logger.info(&crate::i18n::t_fmt(
+            "log.detect_state",
+            &[
+                &result.installed.to_string(),
+                result.version.as_deref().unwrap_or("—"),
+                &commit,
+                &result.running.to_string(),
+            ],
         ));
         result
     })
@@ -121,7 +131,7 @@ fn detect_tools(app: AppHandle) -> Vec<tools::ToolStatus> {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    logger.info(&format!("🔧 环境检测: {summary}"));
+    logger.info(&crate::i18n::t_fmt("log.tools_summary", &[&summary]));
     result
 }
 
@@ -132,9 +142,9 @@ async fn scan_manual_installs(app: AppHandle) -> Vec<String> {
         let logger = app.state::<AppState>().logger.clone();
         let cfg = config::load_config(&app);
         let found = detect::scan_manual_installs(cfg.install_dir.as_deref());
-        logger.info(&format!("🔎 扫描手动安装: 发现 {} 个候选", found.len()));
+        logger.info(&crate::i18n::t_fmt("log.manual_scan_found", &[&found.len().to_string()]));
         for p in &found {
-            logger.info(&format!("   • {p}"));
+            logger.info(&crate::i18n::t_fmt("log.manual_scan_item", &[p]));
         }
         found
     })
@@ -159,10 +169,13 @@ async fn adopt_install(app: AppHandle, path: String) -> Result<(), String> {
         cfg.installed_commit = commit;
         cfg.last_check_at = Some(config::now_string());
         config::save_config(&app, &cfg)?;
-        logger.info(&format!(
-            "✅ 已采用手动安装: {path} (version={} commit={})",
-            cfg.installed_version.as_deref().unwrap_or("—"),
-            cfg.installed_commit.as_deref().unwrap_or("—")
+        logger.info(&crate::i18n::t_fmt(
+            "log.adopt_done",
+            &[
+                &path,
+                cfg.installed_version.as_deref().unwrap_or("—"),
+                cfg.installed_commit.as_deref().unwrap_or("—"),
+            ],
         ));
         Ok(())
     })
@@ -196,9 +209,13 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> 
             return Err(error::AppError::NotInstalled.friendly());
         }
         let result = version::check_for_updates_in_dir(&path).map_err(|e| e.friendly())?;
-        logger.info(&format!(
-            "🔎 检测更新: behind={} update_available={} subject={}",
-            result.behind, result.update_available, result.subject
+        logger.info(&crate::i18n::t_fmt(
+            "log.update_check",
+            &[
+                &result.behind.to_string(),
+                &result.update_available.to_string(),
+                &result.subject,
+            ],
         ));
 
         let mut cfg = config::load_config(&app);
@@ -223,11 +240,38 @@ async fn update(app: AppHandle, channel: Channel<PipelineEvent>) -> Result<(), S
         .map_err(|e| e.to_string())?
 }
 
+/// 生成卸载预览清单（安装目录 + DSH 用户数据目录）。统计通过 channel 实时
+/// 推送进度（step="scan" 的 Output 行），扫描可被 `cancel_uninstall_preview` 取消。
 #[tauri::command]
-async fn uninstall_preview(app: AppHandle) -> Result<UninstallPreview, String> {
-    tauri::async_runtime::spawn_blocking(move || uninstall::build_preview(&app))
-        .await
-        .map_err(|e| e.to_string())
+async fn uninstall_preview(
+    app: AppHandle,
+    channel: Channel<PipelineEvent>,
+) -> Result<UninstallPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let state = app.state::<AppState>();
+            *state.preview_cancel.lock().unwrap() = Some(cancel.clone());
+        }
+        let result = uninstall::build_preview(&app, &channel, &cancel);
+        {
+            let state = app.state::<AppState>();
+            *state.preview_cancel.lock().unwrap() = None;
+        }
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 取消进行中的卸载预览扫描（没有扫描在运行时为空操作）。
+#[tauri::command]
+fn cancel_uninstall_preview(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if let Some(flag) = state.preview_cancel.lock().unwrap().as_ref() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -268,7 +312,7 @@ fn open_terminal(app: AppHandle) -> Result<(), String> {
         .clone()
         .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
     terminal::open_terminal(&dir)?;
-    logger.info(&format!("🖥 打开终端: {dir}"));
+    logger.info(&crate::i18n::t_fmt("log.open_terminal", &[&dir]));
     Ok(())
 }
 
@@ -279,7 +323,7 @@ fn open_web_ui(app: AppHandle) -> Result<(), String> {
     app.opener()
         .open_url(config::WEB_URL, None::<&str>)
         .map_err(|e| e.to_string())?;
-    logger.info(&format!("🌐 在系统浏览器打开 {}", config::WEB_URL));
+    logger.info(&crate::i18n::t_fmt("log.open_browser", &[config::WEB_URL]));
     Ok(())
 }
 
@@ -291,7 +335,7 @@ fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     app.opener()
         .open_url(&url, None::<&str>)
         .map_err(|e| e.to_string())?;
-    logger.info(&format!("🔗 打开外部链接: {url}"));
+    logger.info(&crate::i18n::t_fmt("log.open_external", &[&url]));
     Ok(())
 }
 
@@ -442,6 +486,7 @@ pub fn run() {
             update,
             repair_install,
             uninstall_preview,
+            cancel_uninstall_preview,
             uninstall,
             start_web,
             stop_web,
@@ -457,19 +502,22 @@ pub fn run() {
             plugin_remove,
         ])
         .setup(|app| {
+            // 先按配置初始化界面语言（启动日志、错误提示等后端文案语言），再初始化日志器。
+            let cfg = config::load_config(app.handle());
+            i18n::set_lang(i18n::lang_from_config(&cfg.language));
             let logger = Logger::init(app.handle());
             app.manage(AppState {
                 web_pid: Mutex::new(None),
                 logger: logger.clone(),
+                preview_cancel: Mutex::new(None),
             });
-            let cfg = config::load_config(app.handle());
-            // 按配置初始化界面语言（错误提示等后端文案语言）。
-            i18n::set_lang(i18n::lang_from_config(&cfg.language));
-            logger.info(&format!(
-                "配置加载完成: install_dir={} auto_check={} language={}",
-                cfg.install_dir.as_deref().unwrap_or("—"),
-                cfg.auto_check_enabled,
-                cfg.language
+            logger.info(&crate::i18n::t_fmt(
+                "log.config_loaded",
+                &[
+                    cfg.install_dir.as_deref().unwrap_or("—"),
+                    &cfg.auto_check_enabled.to_string(),
+                    &cfg.language,
+                ],
             ));
             spawn_auto_check(app.handle().clone());
             // 启动时探测全局 dsh 是否可识别 plugin 子命令；结果写入配置
@@ -482,9 +530,9 @@ pub fn run() {
                 cfg.use_pnpm_dsh = !available;
                 let _ = config::save_config(&probe_handle, &cfg);
                 if available {
-                    probe_logger.info("🔌 dsh 命令探测：全局 dsh 可用（插件命令以 dsh 执行）");
+                    probe_logger.info(&crate::i18n::t("log.dsh_probe_ok"));
                 } else {
-                    probe_logger.info("🔌 dsh 命令探测：全局 dsh 不可用（插件等 dsh 命令将以 pnpm dsh 执行）");
+                    probe_logger.info(&crate::i18n::t("log.dsh_probe_fallback"));
                 }
             });
             Ok(())
@@ -494,7 +542,7 @@ pub fn run() {
         .run(|app_handle, event| {
             if let RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    state.logger.info("=== DSH Control Panel 退出 ===");
+                    state.logger.info(&crate::i18n::t("log.exit"));
                 }
             }
         });

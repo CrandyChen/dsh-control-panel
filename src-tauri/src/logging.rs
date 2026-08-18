@@ -24,14 +24,16 @@ impl Logger {
         };
         let _ = logger.open_today_file();
         logger.rotate();
-        logger.info(&format!(
-            "=== DSH Control Panel v{} 启动 ===",
-            env!("CARGO_PKG_VERSION")
+        logger.info(&crate::i18n::t_fmt(
+            "log.boot",
+            &[env!("CARGO_PKG_VERSION")],
         ));
-        logger.info(&format!(
-            "操作系统: {} · 日志文件: {}",
-            std::env::consts::OS,
-            logger.log_file_path().display()
+        logger.info(&crate::i18n::t_fmt(
+            "log.os",
+            &[
+                std::env::consts::OS,
+                &logger.log_file_path().display().to_string(),
+            ],
         ));
         logger
     }

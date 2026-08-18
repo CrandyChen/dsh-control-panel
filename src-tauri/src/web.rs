@@ -47,7 +47,7 @@ pub fn start_web(
         title: "启动 web 服务（pnpm dsh web）".into(),
     });
     let _ = app.emit("web-status", "starting");
-    logger.info("🚀 启动 DeepSeek Harness web 服务（pnpm dsh web）");
+    logger.info(&crate::i18n::t("log.web_start"));
 
     let mut child = spawn_any(
         &["pnpm.cmd", "pnpm"],
@@ -60,7 +60,7 @@ pub fn start_web(
     if let Some(state) = app.try_state::<AppState>() {
         *state.web_pid.lock().unwrap() = Some(pid);
     }
-    logger.info(&format!("进程 PID: {pid}"));
+    logger.info(&crate::i18n::t_fmt("log.web_pid", &[&pid.to_string()]));
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -199,11 +199,16 @@ pub fn stop_web(app: &AppHandle) -> Result<(), String> {
     let _ = app.emit("web-status", "stopped");
     if let Some(state) = app.try_state::<AppState>() {
         if killed.is_empty() {
-            state.logger.info("⏹ 停止 web 服务：未发现运行中的进程");
+            state.logger.info(&crate::i18n::t("log.web_stop_noop"));
         } else {
-            state
-                .logger
-                .info(&format!("⏹ 停止 web 服务：已结束进程 {}", killed.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")));
+            state.logger.info(&crate::i18n::t_fmt(
+                "log.web_stop_killed",
+                &[&killed
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")],
+            ));
         }
     }
     Ok(())

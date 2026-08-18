@@ -39,7 +39,9 @@ export const api = {
   update: (onEvent: (e: PipelineEvent) => void) => runPipeline("update", {}, onEvent),
   repairInstall: (onEvent: (e: PipelineEvent) => void) =>
     runPipeline("repair_install", {}, onEvent),
-  uninstallPreview: () => invoke<UninstallPreview>("uninstall_preview"),
+  uninstallPreview: (onEvent: (e: PipelineEvent) => void) =>
+    runPipeline<UninstallPreview>("uninstall_preview", {}, onEvent),
+  cancelUninstallPreview: () => invoke<void>("cancel_uninstall_preview"),
   uninstall: (selected: string[], onEvent: (e: PipelineEvent) => void) =>
     runPipeline("uninstall", { selected }, onEvent),
   startWeb: (onEvent: (e: PipelineEvent) => void) => runPipeline("start_web", {}, onEvent),

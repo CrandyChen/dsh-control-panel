@@ -99,6 +99,8 @@ export interface PluginEntry {
   spec: string;
   /** 是否在 dsh.profile.bundles 激活层栈中（组合包插件）。 */
   isBundle: boolean;
+  /** 已安装的实际版本（读 node_modules/<key>/package.json；未安装时为 null）。 */
+  version: string | null;
 }
 
 /** 指定 profile 的插件列表。 */
@@ -127,6 +129,7 @@ export type Phase =
   | "installing"
   | "updating"
   | "uninstalling"
+  | "previewing"
   | "checking"
   | "starting"
   | "stopping"

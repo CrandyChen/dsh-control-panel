@@ -52,13 +52,13 @@ DSH Control Panel 将 DeepSeek Harness 常用的**安装**、**更新**、**卸�
 - **封装的命令**：`git fetch` → `git reset --hard origin/<分支>` →  `git clean -fdx` → `pnpm install` → `pnpm run build`（深度修复：删除 `node_modules`；  保底：整体重新克隆）。
 
 ### 5. DSH 插件管理
-- **功能说明**：图形化安装 / 更新 / 卸载 DSH profile 插件（`dsh plugin`）： 智能输入（npm 包名、`github:owner/repo[#ref]`、GitHub 链接或完整命令）、多选 / 一键卸载、各 profile 互相隔离；自动处理两个常见 pnpm 问题 （构建脚本被拦截 → 自动写入 allowBuilds；全局 `dsh` 不可用 → 自动改用 `pnpm dsh`）。
+- **功能说明**：图形化安装 / 更新 / 卸载 DSH profile 插件（`dsh plugin`）： 智能输入（npm 包名、`github:owner/repo[#ref]`、GitHub 链接或完整命令）、多选 / 一键卸载、各 profile 互相隔离；自动处理常见 pnpm 问题 （构建脚本被拦截（含 git 托管插件的 prepare 脚本，`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）→ 自动解析并写入 allowBuilds 后重试；全局 `dsh` 不可用 → 自动改用 `pnpm dsh`）。
 - **用法**：打开「插件管理」；web 服务运行中**只能安装新插件**（更新 / 卸载被禁用，需先停止服务），安装完成后会提示重启 DSH 使插件生效。
 - **封装的命令**：`dsh plugin --profile <名称> add|update|remove <标识...>`。
 
 ### 6. DSH 卸载
 - **功能说明**：彻底移除 DeepSeek Harness。
-- **用法**：点击「卸载」，确认要卸载项—— **安装目录** 与 **DSH 用户数据目录**。
+- **用法**：点击「卸载」，确认要卸载项—— **安装目录** 与 **DSH 用户数据目录**。统计大小/文件数期间实时显示进度（可取消），不会卡住界面。
 - **封装的命令**：无（直接删除目录，带安全护栏）。
 
 ### 7. 其他工具

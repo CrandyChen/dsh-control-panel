@@ -291,9 +291,10 @@ function Shell({
               onCheck={l.checkForUpdates}
               onRepair={l.repair}
               onTerminal={l.openTerminal}
-              onUninstall={async () => {
-                await l.loadPreview();
+              onUninstall={() => {
+                // 立即打开对话框并后台统计卸载清单（统计耗时较长，对话框内展示进度）。
                 setUninstallOpen(true);
+                void l.loadPreview();
               }}
               onPlugins={() => setPluginsOpen(true)}
             />
@@ -335,7 +336,17 @@ function Shell({
         preview={l.preview}
         open={uninstallOpen}
         busy={l.phase === "uninstalling"}
-        onCancel={() => setUninstallOpen(false)}
+        loading={l.previewLoading}
+        progress={l.previewProgress}
+        onCancel={() => {
+          // 统计进行中关闭对话框时取消后台扫描，避免空转。
+          if (l.previewLoading) void l.cancelPreview();
+          setUninstallOpen(false);
+        }}
+        onCancelScan={() => {
+          void l.cancelPreview();
+          setUninstallOpen(false);
+        }}
         onConfirm={async (sel) => {
           await l.uninstall(sel);
           setUninstallOpen(false);

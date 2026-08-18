@@ -54,7 +54,13 @@ export interface Panel {
   update: () => Promise<void>;
   /** 修复安装：清理异常状态并分级重建（详见后端 repair.rs）。 */
   repair: () => Promise<void>;
+  /** 卸载预览是否正在统计目录大小/文件数（生成清单）。 */
+  previewLoading: boolean;
+  /** 卸载预览扫描的最新进度行（后端推送，step="scan"）。 */
+  previewProgress: string | null;
   loadPreview: () => Promise<void>;
+  /** 取消进行中的卸载预览扫描。 */
+  cancelPreview: () => Promise<void>;
   uninstall: (selected: string[]) => Promise<void>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
@@ -83,6 +89,8 @@ export function usePanel(): Panel {
   const [webStatus, setWebStatus] = useState<WebStatus>("idle");
   const [lastCheck, setLastCheck] = useState<UpdateCheckResult | null>(null);
   const [preview, setPreview] = useState<UninstallPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewProgress, setPreviewProgress] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -94,6 +102,8 @@ export function usePanel(): Panel {
   const startedByUs = useRef(false);
   /** 启动失败后是否已提示过修复安装（每会话一次，避免打扰）。 */
   const repairSuggested = useRef(false);
+  /** 用户是否请求取消本次卸载预览扫描（取消后扫描返回的错误静默处理）。 */
+  const previewCancelled = useRef(false);
 
   const appendLog = useCallback((level: string, text: string) => {
     setLogs((prev) => {
@@ -230,19 +240,26 @@ export function usePanel(): Panel {
 
   const onPipelineEvent = useCallback(
     (e: PipelineEvent) => {
+      // 步骤标题本地化：优先按 step id 映射（如 clone/install/build/repair-*），未知 id 回退原文。
+      const stepTitle = (id: string, fallback: string): string => {
+        const localized = t(`step.${id}`);
+        return localized !== `step.${id}` ? localized : fallback;
+      };
       switch (e.type) {
-        case "stepStarted":
-          // 本地化展示：优先按 step id 映射（如 clone/install/build/repair-*），未知 id 回退原文。
-          const localized = t(`step.${e.id}`);
-          setCurrentStep(localized !== `step.${e.id}` ? localized : e.title);
-          appendLog("INFO", `▶ ${e.title}`);
+        case "stepStarted": {
+          const title = stepTitle(e.id, e.title);
+          setCurrentStep(title);
+          appendLog("INFO", `▶ ${title}`);
           break;
+        }
         case "output":
           appendLog(e.stream === "stderr" ? "WARN" : "INFO", e.line);
           break;
-        case "stepFinished":
-          appendLog("INFO", `✓ ${e.id} (exit ${e.exitCode})`);
+        case "stepFinished": {
+          const title = stepTitle(e.id, e.id);
+          appendLog("INFO", `✓ ${title} (exit ${e.exitCode})`);
           break;
+        }
         case "error":
           appendLog("ERROR", e.message);
           break;
@@ -310,14 +327,39 @@ export function usePanel(): Panel {
   const repairRef = useRef(repair);
   repairRef.current = repair;
 
+  /** 生成卸载预览清单：统计安装目录与 ~/.dsh 大小/文件数，期间推送实时进度。
+   * 扫描可能耗时较长（node_modules 数万文件），由调用方在对话框内展示 loading。 */
   const loadPreview = useCallback(async () => {
+    previewCancelled.current = false;
+    setPhase("previewing");
+    setPreviewLoading(true);
+    setPreviewProgress(null);
+    setPreview(null);
     try {
-      const p = await api.uninstallPreview();
+      const p = await api.uninstallPreview((e) => {
+        // 后端进度行（step="scan"）仅用于对话框展示，不写入主日志。
+        if (e.type === "output" && e.step === "scan") setPreviewProgress(e.line);
+      });
       setPreview(p);
     } catch (e) {
-      message.error(t("msg.previewFail", { 0: String(e) }));
+      if (!previewCancelled.current) {
+        message.error(t("msg.previewFail", { 0: String(e) }));
+      }
+    } finally {
+      setPhase("idle");
+      setPreviewLoading(false);
     }
   }, [message, t]);
+
+  /** 取消进行中的卸载预览扫描（无扫描时为空操作）。 */
+  const cancelPreview = useCallback(async () => {
+    previewCancelled.current = true;
+    try {
+      await api.cancelUninstallPreview();
+    } catch {
+      // 取消失败可忽略：扫描会自然结束。
+    }
+  }, []);
 
   const uninstall = useCallback(
     (selected: string[]) =>
@@ -477,7 +519,10 @@ export function usePanel(): Panel {
     checkForUpdates,
     update,
     repair,
+    previewLoading,
+    previewProgress,
     loadPreview,
+    cancelPreview,
     uninstall,
     start,
     stop,
