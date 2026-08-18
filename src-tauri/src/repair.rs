@@ -1,0 +1,482 @@
+//! 修复安装：清理异常过程文件与状态，分级修复 DeepSeek Harness 安装并重新编译部署。
+//!
+//! 修复等级（按需升级，前一级失败才进入下一级）：
+//! - **L1 清理**：停止 web 服务、清理残留进程、清理 git 锁与中断状态文件；
+//! - **L2 重置重建**：`git fetch` → `git reset --hard origin/<默认分支>` → `git clean`
+//!   → `pnpm install`（构建脚本被拦截时自动放行重试）→ `pnpm run build`；
+//! - **L3 深度重建**：删除 `node_modules` 后重新 `pnpm install` + `pnpm run build`；
+//! - **L4 profile 修复**：对 `~/.dsh/profiles/*` 中已初始化的 profile 执行
+//!   `dsh plugin --profile <p> install`（best-effort，失败仅告警不阻断）；
+//! - **L5 保底重装**：删除安装目录并重新 `git clone` + `pnpm install` + `pnpm run build`
+//!   （相当于自动化的「卸载 + 重装」，仅在前几级全部失败时触发）。
+//!
+//! 说明：`~/.dsh` 中的配置、凭据与插件清单在修复过程中保留；安装目录内的未提交本地改动
+//! 会被丢弃（前端确认对话框已向用户明示风险）。
+
+use std::path::{Path, PathBuf};
+
+use tauri::ipc::Channel;
+use tauri::AppHandle;
+
+use crate::config;
+use crate::detect::is_valid_repo;
+use crate::error::AppError;
+use crate::logging::Logger;
+use crate::plugin::{self, RunOutcome};
+use crate::process::PipelineEvent;
+
+// ─────────────────────────────── L1 清理 ───────────────────────────────
+
+/// 收集 git 锁文件与中断状态文件（重建前清理，避免残留状态导致 git 命令挂起/失败）。
+pub fn git_lock_files(dir: &Path) -> Vec<PathBuf> {
+    let git = dir.join(".git");
+    let mut out = Vec::new();
+    if !git.is_dir() {
+        return out;
+    }
+    let mut push = |p: PathBuf| {
+        if p.exists() {
+            out.push(p);
+        }
+    };
+    push(git.join("index.lock"));
+    push(git.join("shallow.lock"));
+    push(git.join("packed-refs.lock"));
+    push(git.join("MERGE_HEAD"));
+    push(git.join("CHERRY_PICK_HEAD"));
+    push(git.join("REBASE_HEAD"));
+    push(git.join("REVERT_HEAD"));
+    push(git.join("BISECT_LOG"));
+    push(git.join("sequencer"));
+    push(git.join("rebase-merge"));
+    push(git.join("rebase-apply"));
+    // refs 与 hooks 下递归收集 *.lock。
+    for sub in ["refs", "hooks"] {
+        let base = git.join(sub);
+        if base.is_dir() {
+            collect_lock_files(&base, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_lock_files(base: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(base) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_lock_files(&p, out);
+            } else if p.extension().map(|x| x == "lock").unwrap_or(false) && p.exists() {
+                out.push(p);
+            }
+        }
+    }
+}
+
+/// 清理残留进程：结束命令行中包含安装目录的 node / pnpm / cmd 进程（best-effort）。
+#[cfg(windows)]
+fn kill_stray_processes(dir: &str, logger: &Logger) {
+    use std::process::Command;
+    let script = r#"
+$dir = $env:DSH_REPAIR_DIR
+Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -and $_.CommandLine.Contains($dir) -and ($_.Name -eq 'node.exe' -or $_.Name -like 'pnpm*' -or $_.Name -eq 'cmd.exe')
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+"#;
+    let result = crate::process::no_window(
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("DSH_REPAIR_DIR", dir),
+    )
+    .output();
+    match result {
+        Ok(_) => logger.info("🧹 已清理安装目录相关的残留进程"),
+        Err(e) => logger.warn(&format!("⚠ 清理残留进程失败（{e}，已跳过，不影响后续步骤）")),
+    }
+}
+
+#[cfg(not(windows))]
+fn kill_stray_processes(_dir: &str, _logger: &Logger) {}
+
+// ─────────────────────────────── 步骤执行 ───────────────────────────────
+
+/// 执行单步命令，输出流式推送；返回结果（ok 可能为 false，由调用方决定升级）。
+fn run_step(
+    step_id: &str,
+    title: &str,
+    programs: &[&str],
+    argv: &[String],
+    cwd: &Path,
+    envs: &[(&str, String)],
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<RunOutcome, String> {
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: step_id.into(),
+        title: title.into(),
+    });
+    logger.info(&format!("▶ {title}: {} {}", programs[0], argv.join(" ")));
+    let outcome = plugin::run_capture(programs, argv, cwd, envs, step_id, channel)?;
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: step_id.into(),
+        exit_code: outcome.exit_code,
+    });
+    if outcome.ok {
+        logger.info(&format!("✓ {title} 完成"));
+    } else {
+        logger.error(&format!("✗ {title} 失败（退出码 {}）", outcome.exit_code));
+    }
+    Ok(outcome)
+}
+
+// ─────────────────────────────── L2 / L3 重建 ───────────────────────────────
+
+/// 完整重建：fetch → reset --hard → clean → install（含构建拦截自动放行）→ build。
+/// 成功返回 Ok(())；失败返回 Err(描述)（供上层升级处理）。
+fn try_rebuild(
+    dir: &Path,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    let git_envs = [("GIT_TERMINAL_PROMPT", "0".to_string())];
+    // fetch 必须最先执行：origin/HEAD 可能因中断而陈旧。
+    let fetch = run_step(
+        "repair-fetch",
+        "拉取远程引用（git fetch origin）",
+        &["git"],
+        &["fetch".into(), "origin".into()],
+        dir,
+        &git_envs,
+        channel,
+        logger,
+    )?;
+    if !fetch.ok {
+        return Err(crate::i18n::t("repair.fetch.failed"));
+    }
+    let branch = crate::version::default_branch(dir).map_err(|e| e.friendly())?;
+    let reset = run_step(
+        "repair-reset",
+        &format!("重置到远程默认分支（git reset --hard origin/{branch}）"),
+        &["git"],
+        &["reset".into(), "--hard".into(), format!("origin/{branch}")],
+        dir,
+        &git_envs,
+        channel,
+        logger,
+    )?;
+    if !reset.ok {
+        return Err(crate::i18n::t("repair.reset.failed"));
+    }
+    let clean = run_step(
+        "repair-clean",
+        "清理多余文件（git clean -fdx，保留 node_modules）",
+        &["git"],
+        &[
+            "clean".into(),
+            "-fdx".into(),
+            "-e".into(),
+            "node_modules".into(),
+            "-e".into(),
+            ".venv".into(),
+        ],
+        dir,
+        &git_envs,
+        channel,
+        logger,
+    )?;
+    if !clean.ok {
+        return Err(crate::i18n::t("repair.clean.failed"));
+    }
+    install_and_build(dir, channel, logger)
+}
+
+/// pnpm install（构建脚本被拦截时自动放行重试一次）+ pnpm run build。
+fn install_and_build(
+    dir: &Path,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    let mut install = run_step(
+        "repair-install",
+        "安装依赖（pnpm install）",
+        &["pnpm.cmd", "pnpm"],
+        &["install".into()],
+        dir,
+        &[],
+        channel,
+        logger,
+    )?;
+    // pnpm 拦截依赖构建脚本时，显式放行后重试一次（与插件管理的处理一致）。
+    if !install.ok && plugin::is_build_blocked(&install.output) {
+        let packages = plugin::parse_ignored_build_packages(&install.output);
+        if packages.is_empty() {
+            logger.warn("检测到 pnpm 拦截构建脚本，但无法解析被拦截的包名");
+        } else {
+            let names: Vec<&str> = packages.iter().map(String::as_str).collect();
+            match plugin::ensure_allow_builds(dir, &names) {
+                Ok(true) => {
+                    logger.warn(&format!(
+                        "检测到 pnpm 拦截构建脚本，已将 {} 加入 allowBuilds 并自动重试",
+                        packages.join("、")
+                    ));
+                    install = run_step(
+                        "repair-install",
+                        "重试安装依赖（pnpm install）",
+                        &["pnpm.cmd", "pnpm"],
+                        &["install".into()],
+                        dir,
+                        &[],
+                        channel,
+                        logger,
+                    )?;
+                }
+                Ok(false) => logger.warn("检测到构建脚本被拦截，但 allowBuilds 已包含相关包，正在重试"),
+                Err(e) => logger.warn(&format!("写入 allowBuilds 失败：{e}")),
+            }
+        }
+    }
+    if !install.ok {
+        return Err(crate::i18n::t("repair.install.failed"));
+    }
+    let build = run_step(
+        "repair-build",
+        "构建（pnpm run build）",
+        &["pnpm.cmd", "pnpm"],
+        &["run".into(), "build".into()],
+        dir,
+        &[],
+        channel,
+        logger,
+    )?;
+    if !build.ok {
+        return Err(crate::i18n::t("repair.build.failed"));
+    }
+    Ok(())
+}
+
+/// 深度重建：删除 node_modules（含构建缓存）后重新安装依赖并构建。
+fn deep_rebuild(
+    dir: &Path,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "repair-clean-nm".into(),
+        title: "删除 node_modules（深度重建）".into(),
+    });
+    logger.warn("🔄 深度重建：删除 node_modules …");
+    let nm = dir.join("node_modules");
+    if nm.exists() {
+        std::fs::remove_dir_all(&nm)
+            .map_err(|e| crate::i18n::t_fmt("repair.nm.delete.failed", &[&e.to_string()]))?;
+    }
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "repair-clean-nm".into(),
+        exit_code: 0,
+    });
+    install_and_build(dir, channel, logger)
+}
+
+// ─────────────────────────────── L4 profile 修复 ───────────────────────────────
+
+/// 修复 profile：对 ~/.dsh/profiles/* 下已初始化的 profile 执行依赖安装（best-effort）。
+/// 通过 `dsh plugin --profile <p> install` 走标准通道（自动处理 pnpm dsh 回退与构建拦截）。
+fn repair_profiles(app: &AppHandle, channel: &Channel<PipelineEvent>, logger: &Logger) {
+    let home = PathBuf::from(crate::detect::dsh_home());
+    let profiles = home.join("profiles");
+    let Ok(rd) = std::fs::read_dir(&profiles) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() || !p.join("package.json").is_file() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        logger.info(&format!("🔧 修复 profile「{name}」的依赖状态…"));
+        match plugin::run_plugin_op(
+            app,
+            &name,
+            &["install".to_string()],
+            "plugin.op.repair",
+            &format!("profile {name}"),
+            channel,
+            logger,
+        ) {
+            Ok(_) => logger.info(&format!("✅ profile「{name}」依赖就绪")),
+            Err(e) => logger.warn(&format!(
+                "⚠ profile「{name}」依赖安装失败：{e}。可稍后在「插件管理」中重试，或删除该 profile 目录后重新初始化。"
+            )),
+        }
+    }
+}
+
+// ─────────────────────────────── L5 保底重装 ───────────────────────────────
+
+/// 保底重装：删除安装目录并重新克隆、安装依赖、构建（相当于自动化的卸载 + 重装）。
+fn reinstall(
+    dir: &str,
+    path: &Path,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| crate::i18n::t("repair.no.parent"))?
+        .to_path_buf();
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "repair-remove".into(),
+        title: "删除损坏的安装目录（保底重装）".into(),
+    });
+    logger.warn(&format!("🗑 保底重装：删除安装目录 {dir} …"));
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(|e| {
+            crate::i18n::t_fmt("repair.dir.delete.failed", &[&e.to_string()])
+        })?;
+    }
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "repair-remove".into(),
+        exit_code: 0,
+    });
+    let url = config::repo_url();
+    let clone = run_step(
+        "repair-clone",
+        "重新克隆仓库（git clone）",
+        &["git"],
+        &["clone".into(), url, dir.to_string()],
+        &parent,
+        &[("GIT_TERMINAL_PROMPT", "0".into())],
+        channel,
+        logger,
+    )?;
+    if !clone.ok {
+        return Err(crate::i18n::t("repair.clone.failed"));
+    }
+    install_and_build(path, channel, logger)
+}
+
+// ─────────────────────────────── 入口 ───────────────────────────────
+
+/// 修复安装主流程（分级升级，见模块文档）。
+pub fn repair(
+    app: &AppHandle,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    // L0：前置校验（网络 / 安装目录 / 运行环境）。
+    crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
+    let cfg = config::load_config(app);
+    let dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| AppError::NotInstalled.friendly())?;
+    let path = PathBuf::from(&dir);
+    if !is_valid_repo(&path) {
+        return Err(AppError::NotInstalled.friendly());
+    }
+    let missing: Vec<String> = crate::tools::detect_tools()
+        .iter()
+        .filter(|t| t.required && (!t.installed || !t.ok))
+        .map(|t| t.id.clone())
+        .collect();
+    if !missing.is_empty() {
+        return Err(crate::i18n::t_fmt("repair.env.missing", &[&missing.join("、")]));
+    }
+
+    // L1：清理异常状态。
+    logger.info("🛠 修复安装开始…");
+    let _ = crate::web::stop_web(app);
+    kill_stray_processes(&dir, logger);
+    let locks = git_lock_files(&path);
+    if !locks.is_empty() {
+        for l in &locks {
+            let _ = if l.is_dir() {
+                std::fs::remove_dir_all(l)
+            } else {
+                std::fs::remove_file(l)
+            };
+        }
+        logger.info(&format!("🧹 已清理 {} 个 git 锁 / 中断状态文件", locks.len()));
+    } else {
+        logger.info("🧹 未发现 git 锁或中断状态文件");
+    }
+
+    // L2 → L3 重建（失败逐级升级）。
+    let rebuilt = if try_rebuild(&path, channel, logger).is_ok() {
+        true
+    } else {
+        logger.warn("🔄 常规修复失败，尝试深度重建（删除 node_modules 后重新安装依赖）…");
+        deep_rebuild(&path, channel, logger).is_ok()
+    };
+
+    // L5 保底重装（前两级都失败才触发）。
+    if !rebuilt {
+        logger.error("⚠ 深度重建仍失败，将执行保底手段：删除安装目录并重新安装（相当于卸载后重装）…");
+        reinstall(&dir, &path, channel, logger)?;
+    }
+
+    // L4：profile 依赖修复（best-effort，不阻断主流程）。
+    repair_profiles(app, channel, logger);
+
+    // 收尾：更新配置。
+    let mut cfg = config::load_config(app);
+    cfg.installed_version = crate::detect::read_version(&path);
+    cfg.installed_commit = crate::version::read_commit(&path);
+    cfg.last_updated_at = Some(config::now_string());
+    cfg.update_available = false;
+    cfg.latest_commit = None;
+    cfg.latest_subject = None;
+    config::save_config(app, &cfg).map_err(|e| e)?;
+
+    let _ = channel.send(PipelineEvent::Finished { ok: true });
+    logger.info("✅ 修复安装完成");
+    Ok(())
+}
+
+// ─────────────────────────────── 测试 ───────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_repo(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("dsh-repair-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(base.join(".git/refs/heads")).unwrap();
+        std::fs::create_dir_all(base.join(".git/hooks")).unwrap();
+        base
+    }
+
+    #[test]
+    fn git_lock_files_finds_locks_and_state_files() {
+        let repo = tmp_repo("locks");
+        std::fs::write(repo.join(".git/index.lock"), "").unwrap();
+        std::fs::write(repo.join(".git/MERGE_HEAD"), "").unwrap();
+        std::fs::write(repo.join(".git/refs/heads/feature-x.lock"), "").unwrap();
+        std::fs::create_dir_all(repo.join(".git/rebase-merge")).unwrap();
+        // 正常文件不应被收集。
+        std::fs::write(repo.join(".git/config"), "[core]\n").unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let locks = git_lock_files(&repo);
+        let names: Vec<String> = locks
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert!(names.iter().any(|n| n.ends_with(".git/index.lock")));
+        assert!(names.iter().any(|n| n.ends_with(".git/MERGE_HEAD")));
+        assert!(names.iter().any(|n| n.ends_with(".git/refs/heads/feature-x.lock")));
+        assert!(names.iter().any(|n| n.ends_with(".git/rebase-merge")));
+        assert!(!names.iter().any(|n| n.ends_with(".git/config")));
+        assert!(!names.iter().any(|n| n.ends_with(".git/HEAD")));
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn git_lock_files_empty_when_no_git_dir() {
+        let base = std::env::temp_dir().join(format!("dsh-repair-nogit-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(git_lock_files(&base).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+}

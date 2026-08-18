@@ -1,0 +1,102 @@
+// 卸载确认：勾选清单（默认全选）→ 二次确认 → 执行。
+// 清单为粗粒度两项：安装目录 + DSH 用户数据目录（~/.dsh）。
+
+import { DeleteOutlined } from "@ant-design/icons";
+import { Alert, Button, Checkbox, Flex, Modal, Space, Tag, Typography } from "antd";
+import { useState } from "react";
+import { useI18n } from "../i18n";
+import type { UninstallPreview } from "../types";
+import { formatSize } from "../types";
+
+interface Props {
+  preview: UninstallPreview | null;
+  open: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (selected: string[]) => Promise<void>;
+}
+
+export default function UninstallDialog({ preview, open, busy, onCancel, onConfirm }: Props) {
+  const { t } = useI18n();
+  const [checked, setChecked] = useState<string[]>([]);
+
+  const confirm = async () => {
+    await onConfirm(checked);
+    setChecked([]);
+  };
+
+  return (
+    <Modal
+      title={
+        <Space>
+          <DeleteOutlined style={{ color: "#ff4d4f" }} />
+          {t("uninstall.title")}
+        </Space>
+      }
+      open={open}
+      onCancel={onCancel}
+      width={680}
+      footer={
+        <Flex justify="end" gap={8}>
+          <Button onClick={onCancel} disabled={busy}>
+            {t("uninstall.cancel")}
+          </Button>
+          <Button
+            danger
+            type="primary"
+            icon={<DeleteOutlined />}
+            disabled={checked.length === 0 || busy}
+            loading={busy}
+            onClick={confirm}
+          >
+            {busy ? t("uninstall.deleting") : t("uninstall.delete", { 0: checked.length })}
+          </Button>
+        </Flex>
+      }
+      destroyOnClose
+    >
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Alert
+          type="error"
+          showIcon
+          message={t("uninstall.alert.title")}
+          description={<div style={{ fontSize: 13 }}>{t("uninstall.alert.desc")}</div>}
+        />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {t("uninstall.dataDir", { 0: preview?.dshHome ?? "—" })}
+          {preview && preview.entries.length === 0 && t("uninstall.empty")}
+        </Typography.Text>
+        <Checkbox.Group
+          style={{ width: "100%" }}
+          value={checked}
+          onChange={(v) => setChecked(v as string[])}
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            {preview?.entries.map((e) => (
+              <Checkbox key={e.id} value={e.path} style={{ width: "100%" }}>
+                <Flex align="center" justify="space-between" gap={8} style={{ width: "100%" }}>
+                  <Typography.Text style={{ fontSize: 13 }} ellipsis={{ tooltip: e.path }}>
+                    {e.name}
+                  </Typography.Text>
+                  <Space size={6}>
+                    <Tag color={e.kind === "directory" ? "blue" : "default"}>
+                      {e.kind === "directory" ? t("uninstall.dir") : t("uninstall.file")}
+                    </Tag>
+                    <Tag>{formatSize(e.size)}</Tag>
+                    {e.kind === "directory" && <Tag>{t("uninstall.items", { 0: e.items })}</Tag>}
+                  </Space>
+                </Flex>
+              </Checkbox>
+            ))}
+            {preview && preview.entries.length === 0 && (
+              <Typography.Text type="secondary">{t("uninstall.noItems")}</Typography.Text>
+            )}
+          </Space>
+        </Checkbox.Group>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {t("uninstall.pnpmNote")}
+        </Typography.Text>
+      </Space>
+    </Modal>
+  );
+}

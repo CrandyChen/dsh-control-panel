@@ -1,0 +1,531 @@
+//! DSH Control Panel — DeepSeek Harness 控制面板（Tauri 2）。
+//!
+//! 职责：安装 / 更新 / 检测 / 启动 / 卸载 DeepSeek Harness，
+//! 只执行标准 git/pnpm 命令，绝不修改 DSH 源码；控制面板自身配置与日志
+//! 保存在 exe 所在目录（portable 语义），与 DSH 完全隔离。
+//!
+//! 多 Tab 浏览器为纯前端 iframe 方案（控制面板主界面常驻挂载），无需原生 webview。
+
+mod config;
+mod detect;
+mod error;
+mod i18n;
+mod install;
+mod logging;
+mod net;
+mod plugin;
+mod process;
+mod repair;
+mod terminal;
+mod tools;
+mod uninstall;
+mod update;
+mod version;
+mod web;
+
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
+
+use config::AppConfig;
+use detect::DetectResult;
+use logging::Logger;
+use process::PipelineEvent;
+use uninstall::UninstallPreview;
+use version::UpdateCheckResult;
+
+/// 全局状态：web 服务 PID + 日志器。
+pub struct AppState {
+    pub web_pid: Mutex<Option<u32>>,
+    pub logger: Logger,
+}
+
+// ─────────────────────────────── 命令 ───────────────────────────────
+
+#[tauri::command]
+fn get_config(app: AppHandle) -> AppConfig {
+    config::load_config(&app)
+}
+
+#[tauri::command]
+fn save_config(app: AppHandle, cfg: AppConfig) -> Result<(), String> {
+    let logger = app.state::<AppState>().logger.clone();
+    // 同步界面语言到全局（错误提示等后端文案按当前语言输出）。
+    i18n::set_lang(i18n::lang_from_config(&cfg.language));
+    config::save_config(&app, &cfg)?;
+    logger.info("⚙ 保存设置（自动检测 / 间隔 / 语言等）");
+    Ok(())
+}
+
+#[tauri::command]
+fn pick_directory(app: AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let logger = app.state::<AppState>().logger.clone();
+    let picked = app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string());
+    if let Some(p) = &picked {
+        logger.info(&format!("📁 选择目录: {p}"));
+    }
+    picked
+}
+
+#[tauri::command]
+async fn detect_state(app: AppHandle) -> DetectResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        let logger = app.state::<AppState>().logger.clone();
+        let cfg = config::load_config(&app);
+        let result = detect::detect_state(cfg.install_dir.as_deref());
+        // 版本与 commit 均由 detect_state 实时读取（config 中可能因手动 git pull 而陈旧）。
+        logger.info(&format!(
+            "🔎 状态探测: installed={} version={} commit={} running={}",
+            result.installed,
+            result.version.as_deref().unwrap_or("—"),
+            result.installed_commit.as_deref().map(|c| &c[..c.len().min(7)]).unwrap_or("—"),
+            result.running
+        ));
+        result
+    })
+    .await
+    .unwrap_or_else(|_| DetectResult {
+        installed: false,
+        valid: false,
+        built: false,
+        version: None,
+        running: false,
+        install_dir: None,
+        dsh_home: detect::dsh_home(),
+        installed_commit: None,
+    })
+}
+
+/// 检测运行环境工具（git / node / pnpm 必装 + python 推荐），启动时自动调用。
+#[tauri::command]
+fn detect_tools(app: AppHandle) -> Vec<tools::ToolStatus> {
+    let logger = app.state::<AppState>().logger.clone();
+    let result = tools::detect_tools();
+    let summary = result
+        .iter()
+        .map(|t| {
+            format!(
+                "{}={}{}",
+                t.id,
+                if t.installed { "ok" } else { "missing" },
+                t.version.as_deref().map(|v| format!("({v})")).unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    logger.info(&format!("🔧 环境检测: {summary}"));
+    result
+}
+
+/// 扫描本机可能手动安装的 DeepSeek Harness。
+#[tauri::command]
+async fn scan_manual_installs(app: AppHandle) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let logger = app.state::<AppState>().logger.clone();
+        let cfg = config::load_config(&app);
+        let found = detect::scan_manual_installs(cfg.install_dir.as_deref());
+        logger.info(&format!("🔎 扫描手动安装: 发现 {} 个候选", found.len()));
+        for p in &found {
+            logger.info(&format!("   • {p}"));
+        }
+        found
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// 采用手动安装的 DeepSeek Harness：将安装目录/版本/commit 写入控制面板配置。
+#[tauri::command]
+async fn adopt_install(app: AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let logger = app.state::<AppState>().logger.clone();
+        let p = PathBuf::from(&path);
+        if !detect::is_valid_repo(&p) {
+            return Err(error::AppError::NotValidInstall(path).friendly());
+        }
+        let version = detect::read_version(&p);
+        let commit = version::read_commit(&p);
+        let mut cfg = config::load_config(&app);
+        cfg.install_dir = Some(path.clone());
+        cfg.installed_version = version;
+        cfg.installed_commit = commit;
+        cfg.last_check_at = Some(config::now_string());
+        config::save_config(&app, &cfg)?;
+        logger.info(&format!(
+            "✅ 已采用手动安装: {path} (version={} commit={})",
+            cfg.installed_version.as_deref().unwrap_or("—"),
+            cfg.installed_commit.as_deref().unwrap_or("—")
+        ));
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn install(
+    app: AppHandle,
+    dir: String,
+    channel: Channel<PipelineEvent>,
+) -> Result<(), String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || install::install(&app, &dir, &channel, &logger))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let logger = app.state::<AppState>().logger.clone();
+        let cfg = config::load_config(&app);
+        let dir = cfg
+            .install_dir
+            .clone()
+            .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
+        let path = PathBuf::from(&dir);
+        if !detect::is_valid_repo(&path) {
+            return Err(error::AppError::NotInstalled.friendly());
+        }
+        let result = version::check_for_updates_in_dir(&path).map_err(|e| e.friendly())?;
+        logger.info(&format!(
+            "🔎 检测更新: behind={} update_available={} subject={}",
+            result.behind, result.update_available, result.subject
+        ));
+
+        let mut cfg = config::load_config(&app);
+        cfg.update_available = result.update_available;
+        cfg.latest_commit = Some(result.remote_commit.clone());
+        cfg.latest_subject = Some(result.subject.clone());
+        cfg.last_check_at = Some(result.checked_at.clone());
+        config::save_config(&app, &cfg).map_err(|e| e)?;
+
+        let _ = app.emit("update-checked", &result);
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn update(app: AppHandle, channel: Channel<PipelineEvent>) -> Result<(), String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || update::update(&app, &channel, &logger))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn uninstall_preview(app: AppHandle) -> Result<UninstallPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || uninstall::build_preview(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn uninstall(
+    app: AppHandle,
+    selected: Vec<String>,
+    channel: Channel<PipelineEvent>,
+) -> Result<(), String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        uninstall::uninstall(&app, selected, &channel, &logger)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn start_web(app: AppHandle, channel: Channel<PipelineEvent>) -> Result<(), String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || web::start_web(&app, &channel, &logger))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn stop_web(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || web::stop_web(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn open_terminal(app: AppHandle) -> Result<(), String> {
+    let logger = app.state::<AppState>().logger.clone();
+    let cfg = config::load_config(&app);
+    let dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
+    terminal::open_terminal(&dir)?;
+    logger.info(&format!("🖥 打开终端: {dir}"));
+    Ok(())
+}
+
+#[tauri::command]
+fn open_web_ui(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let logger = app.state::<AppState>().logger.clone();
+    app.opener()
+        .open_url(config::WEB_URL, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    logger.info(&format!("🌐 在系统浏览器打开 {}", config::WEB_URL));
+    Ok(())
+}
+
+/// 在系统浏览器中打开外部链接（安装指引页使用；协议已由前端校验为 http/https）。
+#[tauri::command]
+fn open_external(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let logger = app.state::<AppState>().logger.clone();
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    logger.info(&format!("🔗 打开外部链接: {url}"));
+    Ok(())
+}
+
+#[tauri::command]
+fn get_logs(app: AppHandle) -> Vec<String> {
+    app.state::<AppState>().logger.read_today()
+}
+
+#[tauri::command]
+fn get_log_dir(app: AppHandle) -> String {
+    app.state::<AppState>()
+        .logger
+        .log_file_path()
+        .to_string_lossy()
+        .to_string()
+}
+
+#[tauri::command]
+fn clear_logs(app: AppHandle) -> Result<(), String> {
+    app.state::<AppState>().logger.clear_today();
+    Ok(())
+}
+
+// ─────────────────────────────── 插件管理 ───────────────────────────────
+
+/// 读取指定 profile 的插件列表（dependencies + 内置组合包）。
+#[tauri::command]
+fn plugin_list(app: AppHandle, profile: String) -> Result<plugin::PluginList, String> {
+    let dir = plugin::profile_dir(&profile)?;
+    let cfg = config::load_config(&app);
+    Ok(plugin::read_plugin_list(&dir, &profile, cfg.use_pnpm_dsh))
+}
+
+/// 智能解析输入并安装插件（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。
+/// 完整命令中若带 --profile 则优先于对话框当前 profile。
+#[tauri::command]
+async fn plugin_install(
+    app: AppHandle,
+    input: String,
+    profile: String,
+    channel: Channel<PipelineEvent>,
+) -> Result<plugin::PluginOpResult, String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = plugin::parse_add_input(&input)?;
+        let target = parsed.profile.clone().unwrap_or(profile);
+        let subject = parsed.specs.join("、");
+        // 必须带 add 动词：dsh plugin --profile X add <spec...>
+        let args = plugin::install_args(&parsed.specs);
+        plugin::run_plugin_op(&app, &target, &args, "plugin.op.install", &subject, &channel, &logger)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 更新指定插件（spec 为列表中的依赖 key，github 标识需与安装时完全一致）。
+#[tauri::command]
+async fn plugin_update(
+    app: AppHandle,
+    spec: String,
+    profile: String,
+    channel: Channel<PipelineEvent>,
+) -> Result<plugin::PluginOpResult, String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 运行中禁止更新插件：文件可能被占用，且新版本插件需重启后才生效。
+        plugin::ensure_mutation_allowed()?;
+        if spec.trim().is_empty() {
+            return Err(i18n::t("plugin.missing.update.spec"));
+        }
+        plugin::run_plugin_op(
+            &app,
+            &profile,
+            &["update".to_string(), spec.clone()],
+            "plugin.op.update",
+            &spec,
+            &channel,
+            &logger,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 卸载一个或多个插件（specs 为列表中的依赖 key；「全部卸载」= 传全部条目）。
+#[tauri::command]
+async fn plugin_remove(
+    app: AppHandle,
+    specs: Vec<String>,
+    profile: String,
+    channel: Channel<PipelineEvent>,
+) -> Result<plugin::PluginOpResult, String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 运行中禁止卸载插件：文件可能被占用，且会破坏运行中的 profile 依赖树。
+        plugin::ensure_mutation_allowed()?;
+        let cleaned: Vec<String> = specs
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if cleaned.is_empty() {
+            return Err(i18n::t("plugin.missing.remove.selection"));
+        }
+        let subject = cleaned.join("、");
+        let mut args = vec!["remove".to_string()];
+        args.extend(cleaned);
+        plugin::run_plugin_op(
+            &app,
+            &profile,
+            &args,
+            "plugin.op.remove",
+            &subject,
+            &channel,
+            &logger,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 修复安装：清理异常状态并分级重建 DeepSeek Harness 安装（详见 repair.rs 模块文档）。
+#[tauri::command]
+async fn repair_install(app: AppHandle, channel: Channel<PipelineEvent>) -> Result<(), String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || repair::repair(&app, &channel, &logger))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ─────────────────────────────── 启动 ───────────────────────────────
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            save_config,
+            pick_directory,
+            detect_state,
+            detect_tools,
+            scan_manual_installs,
+            adopt_install,
+            install,
+            check_for_updates,
+            update,
+            repair_install,
+            uninstall_preview,
+            uninstall,
+            start_web,
+            stop_web,
+            open_terminal,
+            open_web_ui,
+            open_external,
+            get_logs,
+            get_log_dir,
+            clear_logs,
+            plugin_list,
+            plugin_install,
+            plugin_update,
+            plugin_remove,
+        ])
+        .setup(|app| {
+            let logger = Logger::init(app.handle());
+            app.manage(AppState {
+                web_pid: Mutex::new(None),
+                logger: logger.clone(),
+            });
+            let cfg = config::load_config(app.handle());
+            // 按配置初始化界面语言（错误提示等后端文案语言）。
+            i18n::set_lang(i18n::lang_from_config(&cfg.language));
+            logger.info(&format!(
+                "配置加载完成: install_dir={} auto_check={} language={}",
+                cfg.install_dir.as_deref().unwrap_or("—"),
+                cfg.auto_check_enabled,
+                cfg.language
+            ));
+            spawn_auto_check(app.handle().clone());
+            // 启动时探测全局 dsh 是否可识别 plugin 子命令；结果写入配置
+            // （usePnpmDsh），不可识别时所有 dsh 命令改用 `pnpm dsh` 执行。
+            let probe_handle = app.handle().clone();
+            let probe_logger = logger.clone();
+            std::thread::spawn(move || {
+                let available = plugin::probe_global_dsh_plugin();
+                let mut cfg = config::load_config(&probe_handle);
+                cfg.use_pnpm_dsh = !available;
+                let _ = config::save_config(&probe_handle, &cfg);
+                if available {
+                    probe_logger.info("🔌 dsh 命令探测：全局 dsh 可用（插件命令以 dsh 执行）");
+                } else {
+                    probe_logger.info("🔌 dsh 命令探测：全局 dsh 不可用（插件等 dsh 命令将以 pnpm dsh 执行）");
+                }
+            });
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    state.logger.info("=== DSH Control Panel 退出 ===");
+                }
+            }
+        });
+}
+
+/// 自动版本检测：启动 4 秒后立即检测一次，之后按配置间隔循环。
+fn spawn_auto_check(handle: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        loop {
+            let cfg = config::load_config(&handle);
+            if cfg.auto_check_enabled {
+                if let Some(dir) = cfg.install_dir.clone() {
+                    if detect::is_valid_repo(std::path::Path::new(&dir)) {
+                        match version::check_for_updates_in_dir(std::path::Path::new(&dir)) {
+                            Ok(result) => {
+                                let mut cfg2 = config::load_config(&handle);
+                                cfg2.update_available = result.update_available;
+                                cfg2.latest_commit = Some(result.remote_commit.clone());
+                                cfg2.latest_subject = Some(result.subject.clone());
+                                cfg2.last_check_at = Some(result.checked_at.clone());
+                                let _ = config::save_config(&handle, &cfg2);
+                                let _ = handle.emit("update-checked", &result);
+                            }
+                            Err(_) => { /* 后台检测失败静默，等待下个周期 */ }
+                        }
+                    }
+                }
+            }
+            let hours = cfg.auto_check_interval_hours.max(1);
+            std::thread::sleep(std::time::Duration::from_secs(hours * 3600));
+        }
+    });
+}

@@ -1,0 +1,3 @@
+# pnpm 11 设置：允许 esbuild 等依赖执行必要的构建脚本。
+allowBuilds:
+  esbuild: true
