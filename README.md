@@ -1,173 +1,113 @@
 # DSH Control Panel
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Build & Test](https://github.com/<your-user>/dsh-control-panel/actions/workflows/build.yml/badge.svg)](https://github.com/<your-user>/dsh-control-panel/actions/workflows/build.yml)
+[![Build & Test](https://github.com/CrandyChen/dsh-control-panel/actions/workflows/build.yml/badge.svg)](https://github.com/CrandyChen/dsh-control-panel/actions/workflows/build.yml)
 
-**DSH Control Panel** is a friendly Windows desktop GUI for
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH).
-It installs, starts, stops, updates, repairs and uninstalls DeepSeek Harness,
-and manages its plugins — without ever making you touch a command line.
+**DSH Control Panel** is a Windows desktop GUI for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH):
+install, start, stop, update, repair, uninstall DeepSeek Harness, and manage its plugins — all without touching the command line.
 
 [简体中文](README.zh-CN.md)
 
-## What is it?
+## What is this?
 
-DeepSeek Harness is installed and run from a terminal: `git clone`, `pnpm install`,
-`pnpm run build`, `pnpm dsh web`, and `dsh plugin ...` for plugins. DSH Control Panel
-wraps all of that behind a simple GUI:
+DSH Control Panel wraps DeepSeek Harness's common terminal operations — **install**, **update**, **uninstall**, **start**, **stop**, **repair**, and **plugin management** — into a graphical interface, making it accessible for beginners.
 
-- **Friendly UI** built with React 18 + antd 5, dark / light themes, English and
-  Simplified Chinese, step-by-step dialogs and a live log panel.
-- **Tauri 2** desktop shell (Rust backend) — a single, small, portable `exe`, no
-  runtime installation required (Windows 10/11 with WebView2).
-- **Newbie-friendly**: the panel detects your environment, points you to install
-  guides when Git / Node.js / pnpm are missing, pre-checks network reachability, and
-  explains every failure in plain language.
-- **Non-invasive**: it only runs standard `git` / `pnpm` commands. It never modifies
-  DeepSeek Harness sources, and it never touches your `~/.dsh` user data
-  (skills, settings, credentials, plugins) unless you explicitly uninstall.
+- **Beginner-friendly**: Fully graphical UI with friendly guidance and prompts.
+- **Lightweight**: Built on Tauri 2, following DeepSeek Harness's official "**Run from source**" approach without bundling dependencies. Single-file, compact, and portable.
+- **Stay up-to-date**: Automatically fetches the latest DeepSeek Harness source code and builds the newest version.
+- **Non-intrusive to DSH**: Only wraps DSH-related CLI operations without modifying its source code.
 
-## Runtime requirements (to install DSH)
+## Prerequisites for Installing DSH
 
-| Tool | Requirement | Note |
+Since DSH runs via the "Run from source" method, the following dependencies are required:
+
+| Tool | Requirement | Notes |
 | --- | --- | --- |
-| Windows | 10 / 11 (64-bit) | WebView2 Runtime (built into Win11; install from Microsoft if missing on Win10) |
-| Git | any recent version | used to clone / update DeepSeek Harness |
-| Node.js | ≥ 22.19 or ≥ 24 | per DeepSeek Harness engines (LTS recommended) |
-| pnpm | ≥ 11.7 | Node.js must be installed first |
-| Python | recommended, optional | some DSH extensions use it; not required for install/start/update |
+| Windows | 10 / 11 (64-bit) | WebView2 Runtime (included in Win11; install from Microsoft for Win10 if missing) |
+| Git | Any recent version | For cloning / updating DeepSeek Harness |
+| Node.js | ≥ 22.19 or ≥ 24 | Required by the DeepSeek Harness engine (LTS recommended) |
+| pnpm | ≥ 11.7 | Install after Node.js |
+| Python | Recommended (optional) | Used by some extended features; does not affect install / start / update |
 
-The panel checks all of this automatically on startup and shows a step-by-step
-install guide (official download links + `winget` / `npm` commands) if anything is
-missing or too old.
+The control panel automatically detects the above environment on launch. If anything is missing or outdated, in-app installation guidance will be provided.
 
-## Feature overview
+## Feature Overview
 
-Each feature below lists what it does, how to use it, and the CLI commands it wraps.
+### 1. DSH Installation
+- **Description**: Installs DeepSeek Harness using the official "**Run from source**" method.
+- **Usage**: Click "Install" and select any parent directory — the control panel will automatically create a `deepseek-harness` subdirectory.
+- **Wrapped commands**: `git clone https://github.com/deepseek-ai/deepseek-harness.git` → `pnpm install` → `pnpm run build`.
 
-### 1. Install
-- **What**: clone the official repository, install dependencies and build the web UI.
-- **Use**: click **Install**, choose any parent directory — the panel creates the
-  `deepseek-harness` subdirectory automatically. Progress and errors stream into the
-  log panel in real time. A network pre-check runs before cloning.
-- **Commands wrapped**: `git clone https://github.com/deepseek-ai/deepseek-harness.git`
-  → `pnpm install` → `pnpm run build`.
+### 2. DSH Start / Stop
+- **Description**: Starts or stops the DeepSeek Harness web service.
+- **Usage**: Click "Start" — once the service is ready, `http://127.0.0.1:3080` automatically opens in an in-app tab; "Stop" terminates the entire process tree.
+- **Wrapped commands**: `pnpm dsh web`.
 
-### 2. Start / Stop
-- **What**: launch or terminate the DeepSeek Harness web service (process tree
-  management, port 3080).
-- **Use**: click **Start**; the built-in browser tab opens the UI at
-  `http://127.0.0.1:3080` when ready. **Stop** ends the process tree.
-- **Command wrapped**: `pnpm dsh web`.
+### 3. DSH Update
+- **Description**: Checks whether the official DSH source has updates. When a new version is available, a dialog shows the details for you to choose "Update Now" or "Ignore". Background scheduled auto-check displays a red **NEW** badge on the Update button when updates are found.
+- **Usage**: Click "Update" → review the details dialog → confirm execution; the web service is automatically stopped before updating.
+- **Wrapped commands**: `git fetch` / `git rev-parse` / `git rev-list --count` / `git log` (check) → `git pull --ff-only` → `pnpm install` → `pnpm run build` (apply).
 
-### 3. Update
-- **What**: one button that checks for a new version and, when one exists, shows a
-  dialog with details (current/latest commit, commits behind, update subject) and
-  lets you choose **Update Now** or **Ignore**. A background timer checks periodically
-  and a red **NEW** badge appears on the button when an update is available.
-- **Use**: click **Update** → review the dialog → confirm. The web service is stopped
-  automatically before updating.
-- **Commands wrapped**: `git fetch` / `git rev-parse` / `git rev-list --count` /
-  `git log` (check) → `git pull --ff-only` → `pnpm install` → `pnpm run build` (apply).
+### 4. DSH Repair Installation
+- **Description**: Repairs installations that fail to start (commonly caused by interrupted plugin installs/updates leaving residual broken states). Automatically cleans lock files and leftover processes, resets the install directory to official code, and rebuilds. In the worst case, deletes and re-clones the install directory.
+- **Usage**: Click "Repair Installation" (also automatically suggested via a friendly dialog when DSH fails to start).
+- **Wrapped commands**: `git fetch` → `git reset --hard origin/<branch>` → `git clean -fdx` → `pnpm install` → `pnpm run build` (deep repair: delete `node_modules`; fallback: full re-clone).
 
-### 4. Repair Install
-- **What**: fix an installation that cannot start (typically after an interrupted
-  plugin install/update left abnormal state behind). It cleans lock/state files and
-  stray processes, resets the repository to the official code and rebuilds, escalating
-  to deeper repairs (reinstall dependencies, repair profiles) and — as a last resort —
-  deleting and re-cloning the installation.
-- **Use**: click **Repair Install** (also suggested automatically with a friendly
-  dialog when DSH fails to start). Review the risks first: local uncommitted changes
-  in the installation are discarded; `~/.dsh` settings/credentials/plugin list are
-  kept, but plugins of a corrupted profile may need reinstalling.
-- **Commands wrapped**: `git fetch` → `git reset --hard origin/<branch>` →
-  `git clean -fdx` → `pnpm install` → `pnpm run build` (deep: remove `node_modules`;
-  fallback: full re-clone).
+### 5. DSH Plugin Management
+- **Description**: Graphically install / update / uninstall DSH profile plugins (`dsh plugin`): smart input (npm package name, `github:owner/repo[#ref]`, GitHub URL, or full command), multi-select / one-click uninstall, isolated per-profile; automatically handles two common pnpm issues (build scripts blocked → auto-writes allowBuilds; global `dsh` unavailable → auto-falls back to `pnpm dsh`).
+- **Usage**: Open "Plugin Manager"; while the web service is running, **only new plugins can be installed** (update / uninstall are disabled — stop the service first). After installation, a prompt to restart DSH to activate plugins is shown.
+- **Wrapped commands**: `dsh plugin --profile <name> add|update|remove <identifier...>`.
 
-### 5. Plugin Manager
-- **What**: install, update and remove DSH profile plugins (`dsh plugin`) from a GUI:
-  smart input (npm package names, `github:owner/repo[#ref]`, GitHub links or full
-  commands), multi-select / one-click removal, per-profile isolation, and automatic
-  handling of two common pnpm pitfalls (blocked build scripts → allowBuilds fix;
-  global `dsh` unavailable → switch to `pnpm dsh`).
-- **Use**: open **Plugins**; while the web service is running only **installing** is
-  allowed (updating/removing is blocked until you stop the service), and after an
-  install you are reminded to restart DSH for it to take effect.
-- **Commands wrapped**: `dsh plugin --profile <name> add|update|remove <spec...>`.
+### 6. DSH Uninstall
+- **Description**: Completely removes DeepSeek Harness.
+- **Usage**: Click "Uninstall" and confirm the items to remove — **installation directory** and **DSH user data directory**.
+- **Wrapped commands**: None (direct directory deletion with safety guards).
 
-### 6. Uninstall
-- **What**: completely remove DeepSeek Harness.
-- **Use**: click **Uninstall**, confirm the coarse-grained checklist — exactly two
-  items: the **installation directory** and the **DSH user data directory**
-  (`~/.dsh`, containing skills, settings, credentials, sessions and plugins). Paths
-  are validated against a safety guard before deletion.
-- **Commands wrapped**: none (direct directory deletion with safe-path checks).
-
-### 7. Utilities
-- **Open Terminal**: opens PowerShell inside the installation directory
-  (`powershell -NoExit`).
-- **Open UI**: opens the DSH web UI in the system browser.
-- **Built-in browser**: multi-tab iframe browser inside the panel (DSH UI, install
-  guide, any http/https page).
-- **Runtime check**: re-detects Git / Node.js / pnpm / Python and opens the install
-  guide.
-- **Logs**: day-rotated log files (5 kept) beside the exe, live in the panel.
-- **Settings**: scheduled update check & interval, theme, language (auto / 简体中文 /
-  English, persisted in `config.json`), default UI open mode. The panel's own
-  `config.json` and logs live next to the `exe` (portable semantics).
+### 7. Other Tools
+- **Open Terminal**: Opens PowerShell in the installation directory.
+- **Open UI**: Opens the DSH Web UI in the system browser or a new in-app tab (configurable).
+- **Environment Check**: Detects Git / Node.js / pnpm / Python and can open installation guides.
+- **Logs**: Daily-rotated log files next to the exe (keeps 5 copies), viewable in real-time within the panel.
+- **Settings**: Scheduled new-version check interval, theme, language settings, etc.
 
 ## Screenshots
 
-> Screenshots live in [`assets/`](assets/) and are referenced here. To add or replace
-> one, save a PNG into `assets/` and update the table below.
-
-| Main view (Chinese) | Main view (English) |
+| Main UI (Chinese) | Main UI (English) |
 | --- | --- |
-| ![Main view (Chinese)](assets/main.png) | ![Main view (English)](assets/main-en.png) |
+| ![Main UI (Chinese)](assets/main.png) | ![Main UI (English)](assets/main-en.png) |
 
-## Download & install
+## Download & Install
 
-- Portable zip from the [Releases](https://github.com/<your-user>/dsh-control-panel/releases)
-  page: download, unzip, run `DSH-Control-Panel.exe`. No installation needed.
+- Download the portable zip from [Releases](https://github.com/CrandyChen/dsh-control-panel/releases):
+  Extract and double-click `DSH-Control-Panel.exe` — no installation required.
 - Or build from source (see below).
 
-## Development environment
+## Development Environment
 
 - Node.js ≥ 22.19 or ≥ 24, pnpm ≥ 11.7
-- Rust (rustup stable) + VS Build Tools with the "Desktop development with C++" workload
-- WebView2 Runtime (built into Win10/11)
+- Rust (rustup stable) + VS Build Tools (check "Desktop development with C++")
+- WebView2 Runtime (included in Win10/11)
 
 ```bash
 pnpm install
-pnpm tauri dev          # development mode (hot reload)
-pnpm tauri build        # build the exe
-pnpm portable           # build + pack portable zip → dist-portable/
+pnpm tauri dev          # Dev mode (hot reload)
+pnpm tauri build        # Build exe
+pnpm portable           # Build and package portable zip → dist-portable/
 ```
 
-> China mainland network tips: point cargo at a mirror such as rsproxy.cn
-> (`~/.cargo/config.toml`) and pnpm at the npmmirror registry (user-level config,
-> do not commit it).
-
-## Repository structure
+## Directory Structure
 
 ```
-src/                     React frontend (antd 5, dark/light theme, i18n zh-CN/en)
-  i18n.ts                UI dictionary (Chinese + English)
-  usePanel.ts            core state hook (config/detect/phase/logs/tabs/actions)
-  components/            dialogs & panels (install/update/repair/plugins/uninstall/…)
+src/                     React frontend (antd 5, light/dark themes, bilingual)
+  i18n.ts                UI text dictionary (Simplified Chinese + English)
+  usePanel.ts            Core state hook (config/detect/stage/log/tab/action)
+  components/            Dialogs and panels (install/update/repair/plugin/uninstall, etc.)
 src-tauri/src/           Rust backend (config/logging/process/detect/tools/net/version/
                          install/update/repair/uninstall/web/plugin/terminal/i18n)
-scripts/                 portable packaging (pnpm portable)
-assets/                  screenshots referenced by the README
-.github/workflows/       CI: build.yml (checks) + release.yml (tag → portable zip)
+scripts/                 Portable packaging (pnpm portable)
+assets/                  Screenshots referenced by README
+.github/workflows/       CI: build.yml (check) + release.yml (auto-release zip on tag)
 ```
-
-- Requirements / design / process documents are kept **locally** in `docs/` and are
-  intentionally **not** committed to this repository (see `.gitignore`).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch / PR / release workflow.
 
 ## License
 
