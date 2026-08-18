@@ -3,9 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Build & Test](https://github.com/CrandyChen/dsh-control-panel/actions/workflows/build.yml/badge.svg)](https://github.com/CrandyChen/dsh-control-panel/actions/workflows/build.yml)
 
-**DSH Control Panel** 是面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的
-Windows 桌面图形化控制面板：安装、启动、停止、更新、修复、卸载 DeepSeek Harness，
-并管理它的插件——全程无需接触命令行。
+**DSH Control Panel** 是面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的 Windows 桌面图形化控制面板：安装、启动、停止、更新、修复、卸载 DeepSeek Harness 程序，并管理它的插件，无需手动操作命令行。
 
 [English](README-EN.md)
 
@@ -14,7 +12,7 @@ Windows 桌面图形化控制面板：安装、启动、停止、更新、修复
 DSH Control Panel 将 DeepSeek Harness 常用的**安装**、**更新**、**卸载**、**启动**、**停止**、**修复**、**插件管理**等终端命令行操作封装成图形界面，便于新手操作。
 
 - **新手友好**：全图形化界面操作，友好的引导和提示。
-- **轻量**：基于Tauri 2，遵循DeepSeek Harness的官方的“**Run from source**”方式，不封装依赖，保持轻量，单文件、小巧的便携。
+- **轻量**：基于Tauri 2，遵循DeepSeek Harness的官方的“**Run from source**”方式，不封装依赖，保持轻量，单文件，小巧便携。
 - **及时更新**：自动拉取DeepSeek Harness最新源码，构建最新版本应用。
 - **不侵入 DSH**：只封装DSH相关命令行操作，不修改其源码。
 
