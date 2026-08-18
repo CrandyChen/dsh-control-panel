@@ -4,6 +4,12 @@ on:
   push:
     tags: ["v*"]
 
+# 创建 GitHub Release / 上传 zip / 生成发布说明需要 contents: write。
+# tag 触发的运行时 GITHUB_TOKEN 默认只读，不声明会报 403
+# "Resource not accessible by integration"。
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: windows-latest
