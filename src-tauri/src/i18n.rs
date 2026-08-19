@@ -60,8 +60,8 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "Enter a plugin identifier or a full command to install.",
         ),
         "plugin.input.unrecognized" => (
-            "无法识别输入：{0}。支持 npm 包名、github:owner/repo[#ref]、GitHub 链接，或完整 dsh plugin add 命令",
-            "Unrecognized input: {0}. Supported: npm package name, github:owner/repo[#ref], GitHub link, or a full `dsh plugin add` command.",
+            "无法识别输入：{0}。支持 npm 包名、github:owner/repo[#ref]、GitHub 链接（含 .tar.gz 压缩包链接），或完整 dsh plugin add 命令",
+            "Unrecognized input: {0}. Supported: npm package name, github:owner/repo[#ref], GitHub links (including .tar.gz archive URLs), or a full `dsh plugin add` command.",
         ),
         "plugin.spec.empty" => ("插件标识为空", "Plugin identifier is empty."),
         "plugin.spec.invalid.char" => ("插件标识包含非法字符：{0}", "Plugin identifier contains invalid characters: {0}"),
@@ -89,8 +89,8 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "No plugin operation found (add/update/remove). Full command example: dsh plugin --profile web add <package>",
         ),
         "plugin.cmd.add.missing.spec" => (
-            "add 后缺少插件标识（npm 包名 / github:owner/repo / GitHub 链接）",
-            "Missing plugin identifier after add (npm package name / github:owner/repo / GitHub link).",
+            "add 后缺少插件标识（npm 包名 / github:owner/repo / GitHub 链接（含 .tar.gz 压缩包链接））",
+            "Missing plugin identifier after add (npm package name / github:owner/repo / GitHub link (including .tar.gz archive URLs)).",
         ),
         "plugin.cmd.install.verb" => (
             "install 会安装 profile 的全部依赖而非单个插件，请使用 add <包名> 安装指定插件",

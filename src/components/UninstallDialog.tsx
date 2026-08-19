@@ -106,12 +106,17 @@ export default function UninstallDialog({
             type="error"
             showIcon
             message={t("uninstall.alert.title")}
-            description={<div style={{ fontSize: 13 }}>{t("uninstall.alert.desc")}</div>}
+            description={
+              <div style={{ fontSize: 13, whiteSpace: "pre-line", lineHeight: 1.8 }}>
+                {t("uninstall.alert.desc")}
+              </div>
+            }
           />
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {t("uninstall.dataDir", { 0: preview?.dshHome ?? "—" })}
-            {preview && preview.entries.length === 0 && t("uninstall.empty")}
-          </Typography.Text>
+          {preview && preview.entries.length === 0 && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {t("uninstall.empty")}
+            </Typography.Text>
+          )}
           <Checkbox.Group
             style={{ width: "100%" }}
             value={checked}

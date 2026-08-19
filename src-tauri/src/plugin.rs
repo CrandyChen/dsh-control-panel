@@ -115,6 +115,27 @@ pub fn profile_dir(profile: &str) -> Result<PathBuf, String> {
         .join(profile))
 }
 
+/// 列出指定 profiles 目录下的 profile 名称（仅目录、忽略隐藏项、排序）。
+/// 目录不存在 / 无子目录返回空。供插件管理的 profile 下拉框使用。
+pub fn list_profiles_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| !n.is_empty() && !n.starts_with('.'))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort();
+    names
+}
+
+/// 列出 `$DSH_HOME/profiles` 下已存在的 profile（供下拉框选择）。
+pub fn list_profiles() -> Vec<String> {
+    list_profiles_in(&PathBuf::from(crate::detect::dsh_home()).join("profiles"))
+}
+
 /// 读取 profile 清单并整理为插件列表（依赖 + 内置组合包，按名称排序）。
 pub fn read_plugin_list(dir: &Path, profile: &str, use_pnpm_dsh: bool) -> PluginList {
     let mut entries = Vec::new();
@@ -187,6 +208,15 @@ fn strip_env_prefix(mut s: &str) -> &str {
     }
 }
 
+/// 是否为 pnpm 可直接按「远程压缩包」安装的 URL：
+/// 以 `.tar.gz` / `.tgz` 结尾（GitHub 归档 / release 附件），或含 `/archive/` 路径段
+/// （GitHub 归档链接，如 `…/archive/refs/tags/v0.6.3.tar.gz`，部分插件官方文档直接给出）。
+/// 命中时原样透传给 pnpm，不做 `github:owner/repo` 转换。
+fn is_tarball_url(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    l.ends_with(".tar.gz") || l.ends_with(".tgz") || l.contains("/archive/")
+}
+
 /// 从 GitHub 链接路径段（owner/repo[.git][/…][#ref]）构造 `github:owner/repo[#ref]`。
 fn github_from_path(rest: &str, original: &str) -> Result<String, String> {
     let (path_part, ref_part) = match rest.split_once('#') {
@@ -230,6 +260,11 @@ fn classify_spec(raw: &str) -> Result<String, String> {
         .strip_prefix("https://github.com/")
         .or_else(|| lower.strip_prefix("http://github.com/"))
     {
+        // GitHub 压缩包链接（归档 / release 附件）：pnpm 直接按远程 tarball 安装，
+        // 原样透传（部分插件官方文档的安装命令就是这种链接）。
+        if is_tarball_url(s) {
+            return Ok(s.to_string());
+        }
         return github_from_path(rest, s);
     }
     if let Some(rest) = s.strip_prefix("github:") {
@@ -1133,6 +1168,42 @@ mod tests {
             parse_add_input("git+https://github.com/a/b.git").unwrap().specs,
             vec!["git+https://github.com/a/b.git"]
         );
+    }
+
+    #[test]
+    fn parse_github_tarball_urls_pass_through() {
+        // 插件官方文档常见的 GitHub 归档压缩包链接：原样透传（pnpm 按远程 tarball 安装）。
+        let url = "https://github.com/omdsh-dev/dsh-at-file/archive/refs/tags/v0.6.3.tar.gz";
+        assert_eq!(parse_add_input(url).unwrap().specs, vec![url]);
+        // 完整命令形式：spec 原样，--profile 照常识别。
+        let p = parse_add_input(&format!("dsh plugin --profile web add {url}")).unwrap();
+        assert_eq!(p.specs, vec![url]);
+        assert_eq!(p.profile.as_deref(), Some("web"));
+        // GitHub release 附件 .tgz：透传。
+        let rel = "https://github.com/a/b/releases/download/v1.0.0/pkg.tgz";
+        assert_eq!(parse_add_input(rel).unwrap().specs, vec![rel]);
+        // /archive/ 路径（含 .zip）：解析层透传，交给 pnpm 判断。
+        let zip = "https://github.com/a/b/archive/refs/tags/v1.0.0.zip";
+        assert_eq!(parse_add_input(zip).unwrap().specs, vec![zip]);
+        // 非压缩包的仓库内路径仍报错（既有行为不变）。
+        assert!(parse_add_input("https://github.com/owner/repo/tree/main").is_err());
+    }
+
+    // ---------- list_profiles ----------
+
+    #[test]
+    fn list_profiles_reads_subdirs_only() {
+        let base = std::env::temp_dir().join(format!("dsh-profiles-{}", std::process::id()));
+        let dir = base.join("profiles");
+        std::fs::create_dir_all(dir.join("web")).unwrap();
+        std::fs::create_dir_all(dir.join("headless")).unwrap();
+        std::fs::write(dir.join("web/package.json"), "{}").unwrap();
+        // 普通文件不是 profile。
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        assert_eq!(list_profiles_in(&dir), vec!["headless", "web"]);
+        // 目录不存在 → 空。
+        assert!(list_profiles_in(&base.join("nope")).is_empty());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

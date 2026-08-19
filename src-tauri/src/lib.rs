@@ -369,6 +369,12 @@ fn plugin_list(app: AppHandle, profile: String) -> Result<plugin::PluginList, St
     Ok(plugin::read_plugin_list(&dir, &profile, cfg.use_pnpm_dsh))
 }
 
+/// 列出 `$DSH_HOME/profiles` 下已存在的 profile（供插件管理下拉框选择）。
+#[tauri::command]
+fn plugin_profiles() -> Vec<String> {
+    plugin::list_profiles()
+}
+
 /// 智能解析输入并安装插件（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。
 /// 完整命令中若带 --profile 则优先于对话框当前 profile。
 #[tauri::command]
@@ -497,6 +503,7 @@ pub fn run() {
             get_log_dir,
             clear_logs,
             plugin_list,
+            plugin_profiles,
             plugin_install,
             plugin_update,
             plugin_remove,

@@ -53,6 +53,7 @@ export const api = {
   getLogDir: () => invoke<string>("get_log_dir"),
   clearLogs: () => invoke<void>("clear_logs"),
   pluginList: (profile: string) => invoke<PluginList>("plugin_list", { profile }),
+  pluginProfiles: () => invoke<string[]>("plugin_profiles"),
   pluginInstall: (input: string, profile: string, onEvent: (e: PipelineEvent) => void) =>
     runPipeline<PluginOpResult>("plugin_install", { input, profile }, onEvent),
   pluginUpdate: (spec: string, profile: string, onEvent: (e: PipelineEvent) => void) =>

@@ -42,6 +42,7 @@ The control panel automatically detects the above environment on launch. If anyt
 - **Description**: Starts or stops the DeepSeek Harness web service.
 - **Usage**: Click "Start" — once the service is ready, `http://127.0.0.1:3080` automatically opens in an in-app tab; "Stop" terminates the entire process tree.
 - **Wrapped commands**: `pnpm dsh web`.
+- **Runs in the background**: Once started, DSH keeps running in the background as an independent process. Closing this control panel does not affect DSH — reopen the panel any time to stop, update, or repair it.
 
 ### 3. DSH Update
 - **Description**: Checks whether the official DSH source has updates. When a new version is available, a dialog shows the details for you to choose "Update Now" or "Ignore". Background scheduled auto-check displays a red **NEW** badge on the Update button when updates are found.
@@ -54,14 +55,14 @@ The control panel automatically detects the above environment on launch. If anyt
 - **Wrapped commands**: `git fetch` → `git reset --hard origin/<branch>` → `git clean -fdx` → `pnpm install` → `pnpm run build` (deep repair: delete `node_modules`; fallback: full re-clone).
 
 ### 5. DSH Plugin Management
-- **Description**: Graphically install / update / uninstall DSH profile plugins (`dsh plugin`): smart input (npm package name, `github:owner/repo[#ref]`, GitHub URL, or full command), multi-select / one-click uninstall, isolated per-profile; automatically handles common pnpm issues (build scripts blocked — including the `prepare` script of git-hosted plugins, `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` → auto-parses and writes allowBuilds, then retries; global `dsh` unavailable → auto-falls back to `pnpm dsh`).
-- **Usage**: Open "Plugin Manager"; while the web service is running, **only new plugins can be installed** (update / uninstall are disabled — stop the service first). After installation, a prompt to restart DSH to activate plugins is shown.
+- **Description**: Graphically install / update / uninstall DSH profile plugins (`dsh plugin`); plugins are isolated per profile. Just paste a plugin identifier or command into the install input. Supported forms: npm package name (optionally with a version), `github:owner/repo[#version]`, GitHub repo URL, GitHub tarball URL (`.tar.gz` — some plugins' official docs give install commands in this form), or even a full `dsh plugin` command (the `--profile` in it is recognized automatically). Common issues are handled automatically: when pnpm blocks a plugin's build scripts, it is added to the profile's allowBuilds allowlist and the install is retried; when the global `dsh` command is unavailable, `pnpm dsh` is used instead — no manual intervention needed.
+- **Usage**: Open "Plugin Manager", pick a profile (default `web`), paste the install content into the input and click "Install". While the web service is running, **only new plugins can be installed** (update / remove are disabled — stop the service first). After installation, a prompt to restart DSH to activate plugins is shown.
 - **Wrapped commands**: `dsh plugin --profile <name> add|update|remove <identifier...>`.
 
 ### 6. DSH Uninstall
-- **Description**: Completely removes DeepSeek Harness.
-- **Usage**: Click "Uninstall" and confirm the items to remove — **installation directory** and **DSH user data directory**. Live progress is shown while sizes / file counts are being calculated (cancellable), so the UI never appears frozen.
-- **Wrapped commands**: None (direct directory deletion with safety guards).
+- **Description**: Completely removes DeepSeek Harness. The uninstall scope has exactly two items: the **installation directory** (the DSH program itself, code and build output) and the **DSH user data directory** (~/.dsh, your personal data — plugins, configuration, credentials, session history, agent presets, etc.).
+- **Usage**: Click "Uninstall", check the items to delete and confirm. 
+- **Wrapped commands**: None (direct directory deletion with safety guards; the pnpm global cache is never touched).
 
 ### 7. Other Tools
 - **Open Terminal**: Opens PowerShell in the installation directory.

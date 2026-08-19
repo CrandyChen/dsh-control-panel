@@ -17,6 +17,7 @@ import {
   Flex,
   Input,
   Modal,
+  Select,
   Space,
   Spin,
   Table,
@@ -52,6 +53,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
   const { message, modal } = App.useApp();
   const { t } = useI18n();
   const [profile, setProfile] = useState(config?.pluginProfile ?? "web");
+  /** 本机已存在的 profile 列表（$DSH_HOME/profiles 下的目录），供下拉框选择。 */
+  const [profiles, setProfiles] = useState<string[]>([]);
   const [list, setList] = useState<PluginList | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -90,6 +93,11 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       setDetailOpen(false);
       setInput("");
       void loadList(config?.pluginProfile || "web");
+      // 拉取本机已有 profile 供下拉框选择（失败时回退为仅当前 profile）。
+      void api
+        .pluginProfiles()
+        .then(setProfiles)
+        .catch(() => setProfiles([]));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -256,6 +264,14 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
 
   const rows = useMemo(() => (list?.entries ?? []).map((e) => ({ ...e })), [list]);
 
+  /** 下拉框选项：已存在的 profile + 当前选中值（保证选中项始终可见），去重排序。 */
+  const profileOptions = useMemo(() => {
+    const set = new Set<string>([...profiles, profile]);
+    return [...set]
+      .sort((a, b) => a.localeCompare(b))
+      .map((v) => ({ value: v, label: v }));
+  }, [profiles, profile]);
+
   const columns: ColumnsType<PluginEntry> = [
     {
       title: t("plugin.col.name"),
@@ -331,23 +347,21 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       destroyOnClose
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        {/* profile 与命令执行方式 */}
+        {/* profile 选择 */}
         <Flex align="center" gap={8} wrap>
           <Typography.Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
             profile
           </Typography.Text>
-          <Input
+          <Select
             size="small"
-            style={{ width: 140 }}
+            style={{ width: 150 }}
             value={profile}
             disabled={busy}
-            onChange={(e) => setProfile(e.target.value)}
-            onBlur={(e) => saveProfile(e.target.value)}
-            onPressEnter={(e) => saveProfile(e.currentTarget.value)}
+            options={profileOptions}
+            onChange={saveProfile}
+            showSearch
+            placeholder="web"
           />
-          <Tag color={list?.usePnpmDsh ? "orange" : "green"} style={{ marginInlineEnd: 0 }}>
-            {list?.usePnpmDsh ? t("plugin.exec.pnpm") : t("plugin.exec.dsh")}
-          </Tag>
           <Tooltip title={t("plugin.profile.tip")}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               {t("plugin.profile.isolated")}
@@ -381,23 +395,36 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           />
         )}
 
+        {/* 安装指引：新手友好的完整示例列表 */}
+        <Alert
+          type="info"
+          showIcon
+          message={t("plugin.guide.title")}
+          description={
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.9 }}>
+              {(
+                [
+                  ["plugin.guide.npm.label", "plugin.guide.npm.example"],
+                  ["plugin.guide.npmv.label", "plugin.guide.npmv.example"],
+                  ["plugin.guide.github.label", "plugin.guide.github.example"],
+                  ["plugin.guide.url.label", "plugin.guide.url.example"],
+                  ["plugin.guide.tarball.label", "plugin.guide.tarball.example"],
+                  ["plugin.guide.cmd.label", "plugin.guide.cmd.example"],
+                ] as const
+              ).map(([labelKey, exampleKey]) => (
+                <li key={labelKey}>
+                  <span style={{ opacity: 0.75 }}>{t(labelKey)}：</span>
+                  <Typography.Text style={{ fontFamily: "monospace" }}>
+                    {t(exampleKey)}
+                  </Typography.Text>
+                </li>
+              ))}
+            </ul>
+          }
+        />
+
         {/* 安装输入 + 推荐链接 */}
-        <Flex justify="space-between" align="center" gap={8} wrap>
-          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-            {t("plugin.input.hint")}
-          </Typography.Text>
-          <Tooltip title={t("plugin.recommend.tip")}>
-            <Button
-              size="small"
-              type="link"
-              icon={<LinkOutlined />}
-              onClick={() => void openRecommendation()}
-            >
-              {t("plugin.recommend")}
-            </Button>
-          </Tooltip>
-        </Flex>
-        <Flex gap={8}>
+        <Flex gap={8} align="center" wrap>
           <Input
             placeholder={t("plugin.input.placeholder")}
             value={input}
@@ -414,9 +441,21 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           >
             {t("plugin.install.btn")}
           </Button>
+          <Tooltip title={t("plugin.recommend.tip")}>
+            <Button
+              type="link"
+              icon={<LinkOutlined />}
+              onClick={() => void openRecommendation()}
+            >
+              {t("plugin.recommend")}
+            </Button>
+          </Tooltip>
         </Flex>
 
-        {/* 已安装插件列表 */}
+        {/* 已安装的第三方插件列表 */}
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          {t("plugin.installed.title")}
+        </Typography.Text>
         {loading ? (
           <Flex justify="center" style={{ padding: 24 }}>
             <Spin />
@@ -442,18 +481,6 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
             }}
             locale={{ emptyText: t("plugin.empty") }}
           />
-        )}
-        {list && list.builtinBundles.length > 0 && (
-          <Flex align="center" gap={6} wrap>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {t("plugin.builtin")}
-            </Typography.Text>
-            {list.builtinBundles.map((b) => (
-              <Tag key={b} style={{ marginInlineEnd: 0 }}>
-                {b}
-              </Tag>
-            ))}
-          </Flex>
         )}
 
         {/* 卸载操作 */}
