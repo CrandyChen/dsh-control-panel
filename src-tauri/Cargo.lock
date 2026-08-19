@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-control-panel"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "serde",
