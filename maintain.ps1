@@ -196,7 +196,8 @@ function Invoke-Process {
         [string]$FileName,
         [string[]]$Arguments,
         [string]$WorkingDirectory = $script:RepoRoot,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [string]$StderrLevel = 'WARN'
     )
     $argLine = ($Arguments | ForEach-Object { Quote-Arg $_ }) -join ' '
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -230,12 +231,20 @@ function Invoke-Process {
     $script:EvtSeq += 1
     $idOut = "dsh-out-$($script:EvtSeq)"
     $idErr = "dsh-err-$($script:EvtSeq)"
+    $script:CurrentStderrLevel = $StderrLevel
     try {
         $null = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -SourceIdentifier $idOut -Action {
             if ($EventArgs -and $EventArgs.Data) { Append-Log $EventArgs.Data }
         }
         $null = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -SourceIdentifier $idErr -Action {
-            if ($EventArgs -and $EventArgs.Data) { Append-Log $EventArgs.Data 'WARN' }
+            if ($EventArgs -and $EventArgs.Data) {
+                # git 等命令把大量正常提示写到 stderr：Info 级时仅把明显的错误行标红
+                $lvl = $script:CurrentStderrLevel
+                if ($lvl -eq 'INFO' -and ($EventArgs.Data -match '(?i)(fatal:|^fatal|^error|error:|failed|conflict|rejected)')) {
+                    $lvl = 'ERROR'
+                }
+                Append-Log $EventArgs.Data $lvl
+            }
         }
         $proc.BeginOutputReadLine()
         $proc.BeginErrorReadLine()
@@ -275,8 +284,10 @@ function Invoke-Git {
         return -1
     }
     # GIT_TERMINAL_PROMPT=0：避免 git 在凭据提示时挂起等待输入
+    # git 大量正常提示写在 stderr（如 To https://…、Already up to date.），以 INFO（灰色）流出，
+    # 真正的 error/fatal 行会在上方被标为 ERROR（红色）。
     return Invoke-Process -FileName $git -Arguments $Arguments -WorkingDirectory $WorkingDirectory `
-        -Environment @{ 'GIT_TERMINAL_PROMPT' = '0' }
+        -Environment @{ 'GIT_TERMINAL_PROMPT' = '0' } -StderrLevel 'INFO'
 }
 
 function Invoke-Pnpm {
@@ -363,15 +374,18 @@ function Assert-Env {
         }
         $results += $r
     }
-    foreach ($r in $results) {
-        Append-Log ("{0}  {1}  {2}" -f $(if ($r.Ok) { 'OK  ' } else { 'MISS' }), $r.Id, $r.Version)
-    }
     $missing = $results | Where-Object { -not $_.Ok }
     if ($missing) {
+        # 有缺失项时逐项列出，并弹窗指引
+        foreach ($r in $results) {
+            Append-Log ("{0}  {1}  {2}" -f $(if ($r.Ok) { 'OK  ' } else { 'MISS' }), $r.Id, $r.Version)
+        }
         $msg = ($missing | ForEach-Object { "• $($_.Id)`n$($_.Guide)" }) -join "`n`n"
         Show-Message '缺少必要环境' $msg 'Warning'
         return $false
     }
+    # 全部通过时只打一行总览，避免每次操作前都刷 5 行
+    Append-Log ("✔ 环境检查通过：{0}" -f (($results | ForEach-Object { $_.Id }) -join ' / '))
     return $true
 }
 
