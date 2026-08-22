@@ -66,6 +66,16 @@ function Append-Log {
     if ($script:LogQueue) { $script:LogQueue.Enqueue($line) }
 }
 
+# 结果报告：根据退出码给出明确的成功 / 失败结论。
+function Show-Result {
+    param([string]$Action, [int]$Code)
+    if ($Code -eq 0) {
+        Append-Log ("✅ {0} 成功" -f $Action)
+    } else {
+        Append-Log ("❌ {0} 失败（退出码 {1}）" -f $Action, $Code) 'ERROR'
+    }
+}
+
 function Show-Message {
     param([string]$Title, [string]$Text, [string]$Kind = 'Info')
     $icon = switch ($Kind) {
@@ -488,7 +498,7 @@ function Show-GitConfigForm {
         $email = $txtEmail.Text.Trim()
         if ($name) { $null = Invoke-Git @('config', '--global', 'user.name', $name) }
         if ($email) { $null = Invoke-Git @('config', '--global', 'user.email', $email) }
-        Append-Log ("已设置全局 Git 配置：name=$name  email=$email")
+        Append-Log ("✅ 全局 Git 配置已更新：name=$name  email=$email")
     }
     $f.Dispose()
 }
@@ -717,7 +727,7 @@ function Show-StageForm {
 $script:ActInstall = {
     if (-not (Assert-Env @('node', 'pnpm'))) { return }
     Set-Busy $true
-    try { $c = Invoke-Pnpm @('install'); Append-Log ("pnpm install 退出码：$c") }
+    try { $c = Invoke-Pnpm @('install'); Show-Result '安装依赖' $c }
     finally { Set-Busy $false; Refresh-Status }
 }
 
@@ -725,21 +735,25 @@ $script:ActDev = {
     if (-not (Assert-Env @('node', 'pnpm', 'rust', 'vscpp'))) { return }
     Append-Log '提示：pnpm tauri dev 为长驻进程，点击「停止当前任务」或关闭窗口即可结束。' 'WARN'
     Set-Busy $true
-    try { $c = Invoke-Pnpm @('tauri', 'dev'); Append-Log ("tauri dev 已退出（退出码 $c）") }
-    finally { Set-Busy $false; Refresh-Status }
+    try {
+        $c = Invoke-Pnpm @('tauri', 'dev')
+        if ($c -eq -1) { Append-Log 'ℹ 本地开发已停止。' }
+        elseif ($c -eq 0) { Show-Result '本地开发运行' 0 }
+        else { Show-Result '本地开发运行' $c }
+    } finally { Set-Busy $false; Refresh-Status }
 }
 
 $script:ActBuild = {
     if (-not (Assert-Env @('node', 'pnpm', 'rust', 'vscpp'))) { return }
     Set-Busy $true
-    try { $c = Invoke-Pnpm @('tauri', 'build'); Append-Log ("pnpm tauri build 退出码：$c") }
+    try { $c = Invoke-Pnpm @('tauri', 'build'); Show-Result '构建安装程序' $c }
     finally { Set-Busy $false; Refresh-Status }
 }
 
 $script:ActPortable = {
     if (-not (Assert-Env @('node', 'pnpm', 'rust', 'vscpp'))) { return }
     Set-Busy $true
-    try { $c = Invoke-Pnpm @('portable'); Append-Log ("pnpm portable 退出码：$c") }
+    try { $c = Invoke-Pnpm @('portable'); Show-Result '打包便携版' $c }
     finally { Set-Busy $false; Refresh-Status }
 }
 
@@ -765,6 +779,9 @@ $script:ActClone = {
         if ($c -eq 0) {
             Append-Log ("克隆完成：cd $target 后运行 maintain.bat")
             Show-Message '克隆完成' ("项目已克隆到：`n$target`n`n进入该目录后运行 maintain.bat 即可使用本工具。")
+            Show-Result '克隆项目' $c
+        } else {
+            Show-Result '克隆项目' $c
         }
     } finally { Set-Busy $false; Refresh-Status }
 }
@@ -776,12 +793,13 @@ $script:ActSyncMain = {
     Set-Busy $true
     try {
         $c1 = Invoke-Git @('checkout', 'main')
-        if ($c1 -eq 0) {
-            $null = Invoke-Git @('pull', '--ff-only')
-            Append-Log '已同步主分支 main。'
-        } else {
-            Append-Log '切换到主分支失败（可能因本地改动冲突）。' 'ERROR'
+        if ($c1 -ne 0) {
+            Show-Result '切换到主分支' $c1
+            Append-Log '可能因本地改动与主分支冲突。' 'ERROR'
+            return
         }
+        $c2 = Invoke-Git @('pull', '--ff-only')
+        Show-Result '同步主分支 main' $c2
     } finally { Set-Busy $false; Refresh-Status }
 }
 
@@ -816,8 +834,11 @@ $script:ActCommit = {
         $null = Invoke-Git (@('add', '-A', '--') + $selected)
         Append-Log ("已暂存 {0} 个文件，开始提交…" -f $selected.Count)
         $c = Invoke-Git @('commit', '-m', ($r.Type + ': ' + $r.Message))
+        Show-Result '提交代码' $c
         if ($c -eq 0 -and (Confirm-Message '推送到远程？' "是否将提交推送到 origin/$branch ？")) {
-            $null = Invoke-Git @('push', 'origin', $branch)
+            $pc = Invoke-Git @('push', 'origin', $branch)
+            if ($pc -eq 0) { Append-Log ("✅ 已推送到 origin/{0}" -f $branch) }
+            else { Show-Result ("推送 origin/{0}" -f $branch) $pc }
         }
     } finally { Set-Busy $false; Refresh-Status }
 }
@@ -835,15 +856,20 @@ $script:ActCreateBranch = {
         if ($cur -ne 'main') {
             $c = Invoke-Git @('checkout', 'main')
             if ($c -ne 0) {
-                Append-Log '切换到主分支失败（可能因本地改动与主分支冲突）。' 'ERROR'
+                Show-Result '切换到主分支' $c
+                Append-Log '可能因本地改动与主分支冲突。' 'ERROR'
                 return
             }
         }
-        $null = Invoke-Git @('pull', '--ff-only')   # 先同步最新 main
+        $pc = Invoke-Git @('pull', '--ff-only')   # 先同步最新 main
+        if ($pc -ne 0) { Show-Result '同步主分支' $pc; Append-Log '创建功能分支前同步 main 失败，已中止。' 'ERROR'; return }
         $c = Invoke-Git @('checkout', '-b', $branch)
         if ($c -eq 0) {
             Append-Log ("已基于最新 main 创建并切换到功能分支：$branch")
             Refresh-Status
+            Show-Result '创建功能分支' 0
+        } else {
+            Show-Result '创建功能分支' $c
         }
     } finally { Set-Busy $false; Refresh-Status }
 }
@@ -864,11 +890,14 @@ $script:ActPushBranch = {
     try {
         $c = Invoke-Git @('push', '-u', 'origin', $branch)
         if ($c -eq 0) {
+            Append-Log ("✅ 已推送到 origin/{0}" -f $branch)
             $prUrl = "$script:RepoWeb/compare/main...$branch?expand=1"
             Append-Log ("PR 创建页：$prUrl")
             Open-Url $prUrl
             Show-Message '已推送功能分支' (
                 "分支 $branch 已推送到 GitHub。`n`n下一步：`n 1) 在打开的 PR 页面创建 Pull Request（base: main ← compare: $branch）`n 2) 等待 CI 通过并完成 Review / Merge`n 3) 回到本工具选择「同步合并后的 main」并「删除已合并的本地分支」")
+        } else {
+            Show-Result ("推送 origin/{0}" -f $branch) $c
         }
     } finally { Set-Busy $false; Refresh-Status }
 }
@@ -880,12 +909,14 @@ $script:ActSyncMerged = {
     Set-Busy $true
     try {
         $c1 = Invoke-Git @('checkout', 'main')
-        if ($c1 -eq 0) {
-            $null = Invoke-Git @('pull', '--ff-only')
-            Append-Log '已同步合并后的 main（可再选择「删除已合并的本地分支」清理）。'
-        } else {
-            Append-Log '切换到主分支失败（可能因本地改动冲突）。' 'ERROR'
+        if ($c1 -ne 0) {
+            Show-Result '切换到主分支' $c1
+            Append-Log '可能因本地改动冲突。' 'ERROR'
+            return
         }
+        $c2 = Invoke-Git @('pull', '--ff-only')
+        if ($c2 -eq 0) { Append-Log '✅ 已同步合并后的 main（可再选择「删除已合并的本地分支」清理）。' }
+        else { Show-Result '同步合并后的 main' $c2 }
     } finally { Set-Busy $false; Refresh-Status }
 }
 
@@ -924,7 +955,9 @@ $script:ActDeleteBranch = {
     Set-Busy $true
     try {
         $c = Invoke-Git @('branch', '-d', $name)
-        if ($c -ne 0) {
+        if ($c -eq 0) { Show-Result ("删除分支 {0}" -f $name) 0 }
+        else {
+            Show-Result ("删除分支 {0}" -f $name) $c
             Append-Log '提示：git branch -d 仅删除已合并分支；若确认要强制删除未合并分支，请手动执行 git branch -D。' 'WARN'
         }
     } finally { Set-Busy $false; Refresh-Status }
@@ -989,26 +1022,24 @@ $script:ActRelease = {
         $null = Invoke-Git @('status', '--short')
         $null = Invoke-Git @('add', '-A')
         $c = Invoke-Git @('commit', '-m', ("chore: release v$new"))
-        if ($c -ne 0) {
-            Append-Log '提交失败，发布已中止（可先处理问题后再试）。' 'ERROR'
-            return
-        }
+        if ($c -ne 0) { Show-Result '发布提交' $c; Append-Log '发布已中止（可先处理问题后再试）。' 'ERROR'; return }
+        Show-Result '发布提交（版本号修改 + 提交）' 0
         $pc = Invoke-Git @('push', 'origin', 'main')
-        if ($pc -ne 0) {
-            Append-Log '推送 main 失败，发布已中止（不会打 tag）。' 'ERROR'
-            return
-        }
+        if ($pc -ne 0) { Show-Result '推送 main' $pc; Append-Log '发布已中止（不会打 tag）。' 'ERROR'; return }
+        Append-Log '✅ 已推送到 origin/main'
         $null = Invoke-Git @('tag', "v$new")
         $tc = Invoke-Git @('push', 'origin', "v$new")
         if ($tc -eq 0) {
+            Append-Log ("✅ 已推送 tag v$new")
             Open-Url $script:RepoActions
             Show-Message '已触发发布工作流' (
                 "已推送 tag v$new，GitHub Actions 的 Release (portable zip) 已开始执行。`n`n进度查看：`n$script:RepoActions`n`n完成后 zip 下载：`n$script:RepoReleases")
         } else {
-            Append-Log '推送 tag 失败：请检查远端是否已存在该 tag 或网络问题。' 'ERROR'
+            Show-Result ("推送 tag v$new") $tc
+            Append-Log '请检查远端是否已存在该 tag 或网络问题。' 'ERROR'
         }
     } catch {
-        Append-Log ("发布出错：" + $_.Exception.Message) 'ERROR'
+        Append-Log ("❌ 发布出错：" + $_.Exception.Message) 'ERROR'
         Show-Message '发布出错' ("发生错误：`n$($_.Exception.Message)`n`n提示：若版本号文件已被部分修改，可用 `git checkout -- .` 恢复。") 'Error'
     } finally { Set-Busy $false; Refresh-Status }
 }
@@ -1017,7 +1048,12 @@ $script:ActEnvCheck = {
     Set-Busy $true
     try {
         Append-Log '--- 环境依赖自检 ---'
-        $null = Assert-Env @('git', 'node', 'pnpm', 'rust', 'vscpp')
+        $ok = Assert-Env @('git', 'node', 'pnpm', 'rust', 'vscpp')
+        if ($ok) {
+            Append-Log '✅ 环境检查完成，依赖齐全。'
+        } else {
+            Append-Log '❌ 环境存在缺失或版本过低项，请按上方指引安装。' 'WARN'
+        }
     } finally { Set-Busy $false }
 }
 
