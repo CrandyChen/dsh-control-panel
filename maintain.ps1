@@ -67,11 +67,11 @@ function Append-Log {
     if ($script:LogQueue) { $script:LogQueue.Enqueue(@{ Text = $line; Kind = $Level }) }
 }
 
-# 结果报告：根据退出码给出明确的成功 / 失败结论。
+# 结果报告：根据退出码给出明确的成功 / 失败结论（成功→绿，失败→红）。
 function Show-Result {
     param([string]$Action, [int]$Code)
     if ($Code -eq 0) {
-        Append-Log ("✅ {0} 成功" -f $Action)
+        Append-Log ("✅ {0} 成功" -f $Action) 'OK'
     } else {
         Append-Log ("❌ {0} 失败（退出码 {1}）" -f $Action, $Code) 'ERROR'
     }
@@ -385,7 +385,7 @@ function Assert-Env {
         return $false
     }
     # 全部通过时只打一行总览，避免每次操作前都刷 5 行
-    Append-Log ("✔ 环境检查通过：{0}" -f (($results | ForEach-Object { $_.Id }) -join ' / '))
+    Append-Log ("✔ 环境检查通过：{0}" -f (($results | ForEach-Object { $_.Id }) -join ' / ')) 'OK'
     return $true
 }
 
@@ -513,7 +513,7 @@ function Show-GitConfigForm {
         $email = $txtEmail.Text.Trim()
         if ($name) { $null = Invoke-Git @('config', '--global', 'user.name', $name) }
         if ($email) { $null = Invoke-Git @('config', '--global', 'user.email', $email) }
-        Append-Log ("✅ 全局 Git 配置已更新：name=$name  email=$email")
+        Append-Log ("✅ 全局 Git 配置已更新：name=$name  email=$email") 'OK'
     }
     $f.Dispose()
 }
@@ -852,7 +852,7 @@ $script:ActCommit = {
         Show-Result '提交代码' $c
         if ($c -eq 0 -and (Confirm-Message '推送到远程？' "是否将提交推送到 origin/$branch ？")) {
             $pc = Invoke-Git @('push', 'origin', $branch)
-            if ($pc -eq 0) { Append-Log ("✅ 已推送到 origin/{0}" -f $branch) }
+            if ($pc -eq 0) { Append-Log ("✅ 已推送到 origin/{0}" -f $branch) 'OK' }
             else { Show-Result ("推送 origin/{0}" -f $branch) $pc }
         }
     } finally { Set-Busy $false; Refresh-Status }
@@ -880,7 +880,7 @@ $script:ActCreateBranch = {
         if ($pc -ne 0) { Show-Result '同步主分支' $pc; Append-Log '创建功能分支前同步 main 失败，已中止。' 'ERROR'; return }
         $c = Invoke-Git @('checkout', '-b', $branch)
         if ($c -eq 0) {
-            Append-Log ("已基于最新 main 创建并切换到功能分支：$branch")
+            Append-Log ("✅ 已基于最新 main 创建并切换到功能分支：$branch") 'OK'
             Refresh-Status
             Show-Result '创建功能分支' 0
         } else {
@@ -905,7 +905,7 @@ $script:ActPushBranch = {
     try {
         $c = Invoke-Git @('push', '-u', 'origin', $branch)
         if ($c -eq 0) {
-            Append-Log ("✅ 已推送到 origin/{0}" -f $branch)
+            Append-Log ("✅ 已推送到 origin/{0}" -f $branch) 'OK'
             $prUrl = "$script:RepoWeb/compare/main...$branch?expand=1"
             Append-Log ("PR 创建页：$prUrl")
             Open-Url $prUrl
@@ -930,7 +930,7 @@ $script:ActSyncMerged = {
             return
         }
         $c2 = Invoke-Git @('pull', '--ff-only')
-        if ($c2 -eq 0) { Append-Log '✅ 已同步合并后的 main（可再选择「删除已合并的本地分支」清理）。' }
+        if ($c2 -eq 0) { Append-Log '✅ 已同步合并后的 main（可再选择「删除已合并的本地分支」清理）。' 'OK' }
         else { Show-Result '同步合并后的 main' $c2 }
     } finally { Set-Busy $false; Refresh-Status }
 }
@@ -1041,11 +1041,11 @@ $script:ActRelease = {
         Show-Result '发布提交（版本号修改 + 提交）' 0
         $pc = Invoke-Git @('push', 'origin', 'main')
         if ($pc -ne 0) { Show-Result '推送 main' $pc; Append-Log '发布已中止（不会打 tag）。' 'ERROR'; return }
-        Append-Log '✅ 已推送到 origin/main'
+        Append-Log '✅ 已推送到 origin/main' 'OK'
         $null = Invoke-Git @('tag', "v$new")
         $tc = Invoke-Git @('push', 'origin', "v$new")
         if ($tc -eq 0) {
-            Append-Log ("✅ 已推送 tag v$new")
+            Append-Log ("✅ 已推送 tag v$new") 'OK'
             Open-Url $script:RepoActions
             Show-Message '已触发发布工作流' (
                 "已推送 tag v$new，GitHub Actions 的 Release (portable zip) 已开始执行。`n`n进度查看：`n$script:RepoActions`n`n完成后 zip 下载：`n$script:RepoReleases")
@@ -1065,7 +1065,7 @@ $script:ActEnvCheck = {
         Append-Log '--- 环境依赖自检 ---'
         $ok = Assert-Env @('git', 'node', 'pnpm', 'rust', 'vscpp')
         if ($ok) {
-            Append-Log '✅ 环境检查完成，依赖齐全。'
+            Append-Log '✅ 环境检查完成，依赖齐全。' 'OK'
         } else {
             Append-Log '❌ 环境存在缺失或版本过低项，请按上方指引安装。' 'WARN'
         }
@@ -1311,8 +1311,9 @@ function Build-Form {
             $changed = $false
             while ($script:LogQueue.Count -gt 0) {
                 $item = $script:LogQueue.Dequeue()
-                # 按级别着色：INFO 灰白 / WARN 琥珀 / ERROR 红
+                # 按级别着色：OK 绿 / INFO 灰白 / WARN 琥珀 / ERROR 红
                 switch ($item.Kind) {
+                    'OK'    { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(80, 200, 120) }
                     'WARN'  { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(250, 173, 20) }
                     'ERROR' { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(255, 92, 92) }
                     default { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(210, 215, 220) }
