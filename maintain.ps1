@@ -55,7 +55,7 @@ $script:LblDir = $script:LblRepo = $script:LblBranch = $script:LblVersion = $nul
 # ============================================================
 
 # 日志采用「任意线程入队 + UI 线程 Timer 定时刷新」：跨线程/后台线程只入队，
-# 由 Timer(Tick) 在 UI 线程写 TextBox，彻底避免跨线程更新 UI 的偶发崩溃。
+# 由 Timer(Tick) 在 UI 线程写 RichTextBox，并按级别着色。
 function Append-Log {
     param([string]$Text, [string]$Level = 'INFO')
     $line = switch ($Level) {
@@ -63,7 +63,8 @@ function Append-Log {
         'ERROR' { "[ERROR] $Text" }
         default { $Text }
     }
-    if ($script:LogQueue) { $script:LogQueue.Enqueue($line) }
+    # 携带级别入队，供 UI 线程按级别着色
+    if ($script:LogQueue) { $script:LogQueue.Enqueue(@{ Text = $line; Kind = $Level }) }
 }
 
 # 结果报告：根据退出码给出明确的成功 / 失败结论。
@@ -1152,15 +1153,15 @@ function Build-Form {
         }
     })
 
-    # --- 日志框（Fill） ---
-    $log = New-Object System.Windows.Forms.TextBox
+    # --- 日志框（Fill，RichTextBox 支持按行着色） ---
+    $log = New-Object System.Windows.Forms.RichTextBox
     $log.Dock = 'Fill'
     $log.Multiline = $true
     $log.ReadOnly = $true
     $log.ScrollBars = 'Vertical'
     $log.WordWrap = $false
     $log.BackColor = [System.Drawing.Color]::FromArgb(28, 30, 34)
-    $log.ForeColor = [System.Drawing.Color]::Gainsboro
+    $log.ForeColor = [System.Drawing.Color]::FromArgb(210, 215, 220)
     try { $log.Font = New-Object System.Drawing.Font('Consolas', 10) } catch { }
     $form.Controls.Add($log)
 
@@ -1286,7 +1287,7 @@ function Build-Form {
     $script:ActionButtons = @($btnInstall, $btnDev, $btnBuild, $btnPortable, $btnSyncMain, $btnCommitMain,
         $btnRelease, $btnCreateBr, $btnCommitBr, $btnPushBr, $btnSyncMerged, $btnDelBr, $btnClone, $btnGitConfig, $btnEnv)
 
-    # --- 日志刷新 Timer：UI 线程定时把队列内容写入日志框（避免跨线程更新控件） ---
+    # --- 日志刷新 Timer：UI 线程定时把队列内容写入日志框（避免跨线程更新控件），并按级别着色 ---
     $script:LogQueue = [System.Collections.Queue]::Synchronized([System.Collections.Queue]::new())
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 120
@@ -1295,16 +1296,26 @@ function Build-Form {
         try {
             $changed = $false
             while ($script:LogQueue.Count -gt 0) {
-                $line = $script:LogQueue.Dequeue()
-                $script:LogBox.AppendText($line + [Environment]::NewLine)
+                $item = $script:LogQueue.Dequeue()
+                # 按级别着色：INFO 灰白 / WARN 琥珀 / ERROR 红
+                switch ($item.Kind) {
+                    'WARN'  { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(250, 173, 20) }
+                    'ERROR' { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(255, 92, 92) }
+                    default { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(210, 215, 220) }
+                }
+                $script:LogBox.AppendText($item.Text + [Environment]::NewLine)
                 $changed = $true
             }
+            # 复位默认色
+            $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(210, 215, 220)
             if ($changed) {
                 # 日志过长时截断，避免长期运行导致内存/性能下降
                 if ($script:LogBox.TextLength -gt 500000) {
                     $keep = $script:LogBox.Text.Substring($script:LogBox.TextLength - 200000)
                     $script:LogBox.Clear()
+                    $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(130, 150, 170)
                     $script:LogBox.AppendText('[LOG] 日志过长，已保留末尾内容。' + [Environment]::NewLine)
+                    $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(210, 215, 220)
                     $script:LogBox.AppendText($keep)
                 }
                 $script:LogBox.SelectionStart = $script:LogBox.TextLength
