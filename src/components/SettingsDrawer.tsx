@@ -10,13 +10,11 @@ import type { AppConfig } from "../types";
 interface Props {
   open: boolean;
   config: AppConfig | null;
-  dark: boolean;
   onClose: () => void;
   onSave: (patch: Partial<AppConfig>) => Promise<void>;
-  onTheme: (dark: boolean) => void;
 }
 
-export default function SettingsDrawer({ open, config, dark, onClose, onSave, onTheme }: Props) {
+export default function SettingsDrawer({ open, config, onClose, onSave }: Props) {
   const { message } = App.useApp();
   const { t } = useI18n();
   const [autoCheck, setAutoCheck] = useState(config?.autoCheckEnabled ?? true);
@@ -56,12 +54,13 @@ export default function SettingsDrawer({ open, config, dark, onClose, onSave, on
         </Form.Item>
         <Form.Item label={t("settings.theme")}>
           <Segmented
-            value={dark ? "dark" : "light"}
+            value={config?.theme ?? "auto"}
             options={[
-              { label: t("settings.theme.dark"), value: "dark" },
+              { label: t("settings.theme.auto"), value: "auto" },
               { label: t("settings.theme.light"), value: "light" },
+              { label: t("settings.theme.dark"), value: "dark" },
             ]}
-            onChange={(v) => onTheme(v === "dark")}
+            onChange={(v) => void save({ theme: v as AppConfig["theme"] })}
           />
         </Form.Item>
         <Form.Item

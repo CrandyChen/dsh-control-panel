@@ -830,6 +830,7 @@ name = "dsh-control-panel"
 version = "1.1.1"
 dependencies = [
  "chrono",
+ "semver",
  "serde",
  "serde_json",
  "sys-locale",

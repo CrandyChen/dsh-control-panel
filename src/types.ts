@@ -17,6 +17,8 @@ export interface AppConfig {
   pluginProfile: string;
   /** 「打开界面」默认打开方式：tab = 程序内新标签页；browser = 系统浏览器。 */
   openUiMode: "tab" | "browser";
+  /** 界面主题：auto（跟随系统，随 OS 深/浅实时切换）/ light / dark。持久化保存。 */
+  theme: "auto" | "light" | "dark";
   /** 界面语言：auto（跟随系统，非中英默认英文）/ zh-CN / en。 */
   language: "auto" | "zh-CN" | "en";
 }
@@ -121,6 +123,23 @@ export interface PluginOpResult {
   ok: boolean;
   message: string;
   action: string;
+}
+
+/** 单个插件的更新检测结果。 */
+export interface PluginUpdateInfo {
+  key: string;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  /** 来源：npm / github / unknown。 */
+  source: string;
+}
+
+/** 指定 profile 的插件更新检测结果。 */
+export interface PluginUpdates {
+  profile: string;
+  checkedAt: string;
+  entries: PluginUpdateInfo[];
 }
 
 /** 长任务进行中的阶段（驱动按钮禁用与 Steps 展示）。 */

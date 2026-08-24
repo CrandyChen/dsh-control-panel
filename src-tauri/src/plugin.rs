@@ -12,9 +12,11 @@
 //! 包（含 pnpm 提示的精确 allowBuilds key），写入该 profile 的
 //! pnpm-workspace.yaml（显式 `包名: true`；实测 `"*": true` 通配不会放行）后重试。
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -23,7 +25,7 @@ use tauri::AppHandle;
 use crate::config::{self, AppConfig};
 use crate::error::AppError;
 use crate::logging::Logger;
-use crate::process::{spawn_any, PipelineEvent};
+use crate::process::{no_window, spawn_any, PipelineEvent};
 
 /// 失败分析保留的输出行数（错误上下文用）。
 const MAX_KEPT_LINES: usize = 40;
@@ -977,6 +979,261 @@ pub fn run_plugin_op(
     }
 }
 
+// ─────────────────────────────── 插件更新检测 ───────────────────────────────
+
+/// 单个插件的更新检测结果。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateInfo {
+    /// 依赖 key（与插件列表一致）。
+    pub key: String,
+    /// 当前已安装版本（node_modules 的 package.json；未知为 None）。
+    pub current_version: Option<String>,
+    /// 最新可用版本（无法获取为 None）。
+    pub latest_version: Option<String>,
+    /// 检测到有更新（latest > current）。
+    pub update_available: bool,
+    /// 来源：npm / github / unknown。
+    pub source: String,
+}
+
+/// 指定 profile 的插件更新检测结果。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdates {
+    pub profile: String,
+    pub checked_at: String,
+    pub entries: Vec<PluginUpdateInfo>,
+}
+
+/// 运行命令并捕获 stdout+stderr（禁终端窗口；带超时，超时/失败返回 None）。
+fn run_query(programs: &[&str], args: &[String], cwd: &Path, timeout: Duration) -> Option<String> {
+    let mut last_err: Option<std::io::Error> = None;
+    for prog in programs {
+        let mut cmd = Command::new(prog);
+        no_window(&mut cmd);
+        cmd.args(args).current_dir(cwd);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let stdout = child.stdout.take();
+                let out = Arc::new(Mutex::new(String::new()));
+                if let Some(mut o) = stdout {
+                    let o1 = out.clone();
+                    std::thread::spawn(move || {
+                        let mut s = String::new();
+                        let _ = o.read_to_string(&mut s);
+                        *o1.lock().unwrap() += &s;
+                    });
+                }
+                if let Some(mut e) = child.stderr.take() {
+                    let o2 = out.clone();
+                    std::thread::spawn(move || {
+                        let mut s = String::new();
+                        let _ = e.read_to_string(&mut s);
+                        *o2.lock().unwrap() += &s;
+                    });
+                }
+                let deadline = Instant::now() + timeout;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) => {
+                            if Instant::now() > deadline {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return None;
+                            }
+                            std::thread::sleep(Duration::from_millis(60));
+                        }
+                        Err(_) => return None,
+                    }
+                }
+                // 等待读取线程把输出写完。
+                std::thread::sleep(Duration::from_millis(50));
+                let res = out.lock().unwrap().trim().to_string();
+                if res.is_empty() {
+                    return None;
+                }
+                return Some(res);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let _ = last_err;
+    None
+}
+
+/// 是否为 npm 依赖（版本范围 / 精确版 / tag 等），非 git/文件/workspace 链接且不含 `#`。
+pub fn is_npm_spec(spec: &str) -> bool {
+    let s = spec.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    for prefix in [
+        "github:", "git+", "git@", "ssh://", "file:", "link:", "workspace:", "portal:", "catalog:", "http://", "https://",
+    ] {
+        if lower.starts_with(prefix) {
+            return false;
+        }
+    }
+    !s.contains('#')
+}
+
+/// 从插件 spec 解析 GitHub 仓库标识 `owner/repo`（多形态；非 github 返回 None）。
+pub fn github_repo_from_spec(spec: &str) -> Option<String> {
+    let s = spec.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    // 纯 `owner/repo` GitHub 简写：无协议/冒号/@/路径穿越，恰两段合法字符。
+    let bare_ok = !s.contains("://")
+        && !s.contains('@')
+        && !s.contains(':')
+        && s.split('/').count() == 2
+        && s.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        });
+    if !(lower.contains("github.com")
+        || s.starts_with("github:")
+        || s.starts_with("git@github.com:")
+        || s.starts_with("git+https://github.com/")
+        || bare_ok)
+    {
+        return None;
+    }
+    // 去掉 github: 前缀与 #ref。
+    let s = if let Some(rest) = s.strip_prefix("github:") {
+        rest
+    } else {
+        s
+    };
+    let s = s.split('#').next().unwrap_or(s).trim();
+    // 依次剥离协议前缀 / git+ / git@ssh 形式 / 域名。
+    let mut p = s;
+    if let Some(r) = p.strip_prefix("git+") {
+        p = r;
+    }
+    if let Some(r) = p.strip_prefix("https://") {
+        p = r;
+    } else if let Some(r) = p.strip_prefix("http://") {
+        p = r;
+    }
+    if let Some(r) = p.strip_prefix("git@github.com:") {
+        p = r;
+    }
+    if let Some(r) = p.strip_prefix("github.com/") {
+        p = r;
+    }
+    let p = p.trim().trim_end_matches(".git").trim_matches('/');
+    let mut segs = p.split('/');
+    let owner = segs.next()?;
+    let repo = segs.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+/// 从 `git ls-remote --tags` 输出中选取最高的语义化版本 tag。
+pub fn pick_latest_tag(output: &str) -> Option<String> {
+    fn parse_ver(s: &str) -> Option<semver::Version> {
+        let t = s.trim().trim_start_matches('v');
+        semver::Version::parse(t).ok()
+    }
+    let mut best: Option<(semver::Version, String)> = None;
+    for line in output.lines() {
+        let token = line.split_whitespace().last().unwrap_or("");
+        let tag = token.strip_prefix("refs/tags/").unwrap_or("");
+        let tag = tag.trim_end_matches("^{}");
+        if tag.is_empty() {
+            continue;
+        }
+        if let Some(v) = parse_ver(tag) {
+            if best.as_ref().map(|(bv, _)| v > *bv).unwrap_or(true) {
+                best = Some((v, tag.to_string()));
+            }
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+/// semver 比较：a < b 且两者均可解析时返回 true。
+fn version_less(a: &str, b: &str) -> bool {
+    let pa = semver::Version::parse(a.trim().trim_start_matches('v')).ok();
+    let pb = semver::Version::parse(b.trim().trim_start_matches('v')).ok();
+    match (pa, pb) {
+        (Some(x), Some(y)) => x < y,
+        _ => false,
+    }
+}
+
+/// 查询 npm 包的最新版本（`<pkg> view <name> version`），失败返回 None。
+fn query_latest_npm(pkg: &str, cwd: &Path) -> Option<String> {
+    let args = vec!["view".to_string(), pkg.to_string(), "version".to_string()];
+    let out = run_query(&["pnpm.cmd", "pnpm", "npm.cmd", "npm"], &args, cwd, Duration::from_secs(20))?;
+    out.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.to_ascii_lowercase().contains("notice"))
+        .map(String::from)
+}
+
+/// 查询 GitHub 仓库的最高版本 tag，失败返回 None。
+fn query_latest_github_tag(repo: &str, cwd: &Path) -> Option<String> {
+    let url = format!("https://github.com/{repo}");
+    let args = vec![
+        "ls-remote".to_string(),
+        "--tags".to_string(),
+        "--refs".to_string(),
+        url,
+    ];
+    let out = run_query(&["git.cmd", "git"], &args, cwd, Duration::from_secs(20))?;
+    pick_latest_tag(&out)
+}
+
+fn make_update_info(key: String, current: Option<String>, latest: Option<String>, source: &str) -> PluginUpdateInfo {
+    let update_available = match (&current, &latest) {
+        (Some(c), Some(l)) => version_less(c, l),
+        _ => false,
+    };
+    PluginUpdateInfo {
+        key,
+        current_version: current,
+        latest_version: latest,
+        update_available,
+        source: source.to_string(),
+    }
+}
+
+/// 检测指定 profile 已安装第三方插件的更新。
+/// npm 类查询 registry 最新版；github 类查询远程最高版本 tag；其余标记 unknown。
+/// 网络失败 / 超时 / 包不存在：该项 latest 为 None、不标记更新，不中断整体。
+pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUpdates, String> {
+    let pdir = profile_dir(profile)?;
+    let cwd = Path::new(install_dir);
+    let list = read_plugin_list(&pdir, profile, true);
+    let mut entries = Vec::new();
+    for e in &list.entries {
+        if is_npm_spec(&e.spec) {
+            let latest = query_latest_npm(&e.key, cwd);
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "npm"));
+        } else if let Some(repo) = github_repo_from_spec(&e.spec) {
+            let latest = query_latest_github_tag(&repo, cwd);
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "github"));
+        } else {
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), None, "unknown"));
+        }
+    }
+    Ok(PluginUpdates {
+        profile: profile.to_string(),
+        checked_at: crate::config::now_string(),
+        entries,
+    })
+}
+
 // ─────────────────────────────── 测试 ───────────────────────────────
 
 #[cfg(test)]
@@ -1204,6 +1461,72 @@ mod tests {
         // 目录不存在 → 空。
         assert!(list_profiles_in(&base.join("nope")).is_empty());
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    // ---------- 插件更新检测 ----------
+
+    #[test]
+    fn npm_spec_detection() {
+        assert!(is_npm_spec("^1.2.0"));
+        assert!(is_npm_spec("~2.0.0"));
+        assert!(is_npm_spec("1.0.0"));
+        assert!(is_npm_spec("latest"));
+        assert!(is_npm_spec("@scope/pkg"));
+        // 非 npm。
+        assert!(!is_npm_spec("github:omdsh-dev/dsh-better-sidebar"));
+        assert!(!is_npm_spec("git+https://github.com/a/b.git"));
+        assert!(!is_npm_spec("file:../x"));
+        assert!(!is_npm_spec("link:./y"));
+        assert!(!is_npm_spec("workspace:*"));
+        assert!(!is_npm_spec("https://github.com/a/b"));
+        assert!(!is_npm_spec("github:owner/repo#tag"));
+        assert!(!is_npm_spec(""));
+    }
+
+    #[test]
+    fn github_repo_extraction() {
+        assert_eq!(
+            github_repo_from_spec("github:omdsh-dev/dsh-better-sidebar").as_deref(),
+            Some("omdsh-dev/dsh-better-sidebar")
+        );
+        assert_eq!(
+            github_repo_from_spec("github:omdsh-dev/dsh-better-sidebar#v0.13.1").as_deref(),
+            Some("omdsh-dev/dsh-better-sidebar")
+        );
+        assert_eq!(
+            github_repo_from_spec("https://github.com/omdsh-dev/dsh-at-file/archive/refs/tags/v0.6.3.tar.gz").as_deref(),
+            Some("omdsh-dev/dsh-at-file")
+        );
+        assert_eq!(
+            github_repo_from_spec("git+https://github.com/a/b.git").as_deref(),
+            Some("a/b")
+        );
+        assert_eq!(github_repo_from_spec("omdsh-dev/dsh-better-sidebar").as_deref(), Some("omdsh-dev/dsh-better-sidebar"));
+        // 非 github：不误判。
+        assert_eq!(github_repo_from_spec("https://gitlab.com/a/b"), None);
+        assert_eq!(github_repo_from_spec("file:../x"), None);
+        assert_eq!(github_repo_from_spec(""), None);
+        assert_eq!(github_repo_from_spec("github:"), None);
+    }
+
+    #[test]
+    fn latest_tag_picks_highest_semver() {
+        let out = "aaa\trefs/tags/v0.10.0\nbbb\trefs/tags/v0.9.1\nccc\trefs/tags/v0.10.0^{}\nddd\trefs/tags/release\n";
+        assert_eq!(pick_latest_tag(out).as_deref(), Some("v0.10.0"));
+        let out2 = "aaa\trefs/tags/1.2.3\nbbb\trefs/tags/2.0.0\n";
+        assert_eq!(pick_latest_tag(out2).as_deref(), Some("2.0.0"));
+        assert_eq!(pick_latest_tag("aaa\trefs/tags/release"), None);
+        assert_eq!(pick_latest_tag(""), None);
+    }
+
+    #[test]
+    fn version_less_is_strict() {
+        assert!(version_less("0.13.0", "0.13.1"));
+        assert!(version_less("1.0.0", "1.2.3"));
+        assert!(!version_less("1.2.3", "1.2.3"));
+        assert!(!version_less("1.3.0", "1.2.3"));
+        assert!(!version_less("abc", "1.0.0"));
+        assert!(!version_less("1.0.0", "abc"));
     }
 
     #[test]

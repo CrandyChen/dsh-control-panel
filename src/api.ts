@@ -9,6 +9,7 @@ import type {
   PipelineEvent,
   PluginList,
   PluginOpResult,
+  PluginUpdates,
   ToolStatus,
   UninstallPreview,
   UpdateCheckResult,
@@ -54,6 +55,7 @@ export const api = {
   clearLogs: () => invoke<void>("clear_logs"),
   pluginList: (profile: string) => invoke<PluginList>("plugin_list", { profile }),
   pluginProfiles: () => invoke<string[]>("plugin_profiles"),
+  pluginCheckUpdates: (profile: string) => invoke<PluginUpdates>("plugin_check_updates", { profile }),
   pluginInstall: (input: string, profile: string, onEvent: (e: PipelineEvent) => void) =>
     runPipeline<PluginOpResult>("plugin_install", { input, profile }, onEvent),
   pluginUpdate: (spec: string, profile: string, onEvent: (e: PipelineEvent) => void) =>
@@ -68,6 +70,10 @@ export function onWebStatus(cb: (s: WebStatus) => void): Promise<() => void> {
 
 export function onUpdateChecked(cb: (r: UpdateCheckResult) => void): Promise<() => void> {
   return listen<UpdateCheckResult>("update-checked", (e) => cb(e.payload));
+}
+
+export function onPluginUpdatesChecked(cb: (u: PluginUpdates) => void): Promise<() => void> {
+  return listen<PluginUpdates>("plugin-updates-checked", (e) => cb(e.payload));
 }
 
 export function onLogLine(cb: (l: LogLine) => void): Promise<() => void> {

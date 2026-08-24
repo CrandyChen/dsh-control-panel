@@ -2,7 +2,7 @@
 
 import { App } from "antd";
 import { createElement, useCallback, useEffect, useRef, useState } from "react";
-import { api, onLogLine, onUpdateChecked, onWebStatus } from "./api";
+import { api, onLogLine, onPluginUpdatesChecked, onUpdateChecked, onWebStatus } from "./api";
 import { WEB_URL } from "./constants";
 import { useI18n } from "./i18n";
 import type {
@@ -12,6 +12,7 @@ import type {
   LogLine,
   Phase,
   PipelineEvent,
+  PluginUpdates,
   ToolStatus,
   UninstallPreview,
   UpdateCheckResult,
@@ -76,6 +77,10 @@ export interface Panel {
   saveSettings: (patch: Partial<AppConfig>) => Promise<void>;
   clearLogs: () => Promise<void>;
   appendLog: (level: string, text: string) => void;
+  /** 最近一次插件更新检测结果（默认 profile）。 */
+  pluginUpdates: PluginUpdates | null;
+  /** 手动触发一次当前 profile 的插件更新检测。 */
+  checkPluginUpdates: () => Promise<void>;
 }
 
 export function usePanel(): Panel {
@@ -95,6 +100,8 @@ export function usePanel(): Panel {
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [manualCandidates, setManualCandidates] = useState<string[] | null>(null);
+  /** 最近一次插件更新检测结果（默认为当前插件 profile；周期/手动触发更新）。 */
+  const [pluginUpdates, setPluginUpdates] = useState<PluginUpdates | null>(null);
   const [logDir, setLogDir] = useState("");
 
   const manualIgnored = useRef(false);
@@ -198,6 +205,7 @@ export function usePanel(): Panel {
             : prev,
         );
       }),
+      onPluginUpdatesChecked((u) => setPluginUpdates(u)),
     ];
     return () => {
       for (const u of unsubs) void u.then((f) => f());
@@ -499,6 +507,17 @@ export function usePanel(): Panel {
     }
   }, [message, t]);
 
+  /** 手动触发当前 profile 的插件更新检测（结果写入 pluginUpdates，供徽标/列表展示）。 */
+  const checkPluginUpdates = useCallback(async () => {
+    const p = config?.pluginProfile || "web";
+    try {
+      const u = await api.pluginCheckUpdates(p);
+      setPluginUpdates(u);
+    } catch (e) {
+      message.error(t("plugin.updates.fail", { 0: String(e) }), 5);
+    }
+  }, [config?.pluginProfile, message, t]);
+
   return {
     config,
     detect,
@@ -538,5 +557,7 @@ export function usePanel(): Panel {
     saveSettings,
     clearLogs,
     appendLog,
+    pluginUpdates,
+    checkPluginUpdates,
   };
 }

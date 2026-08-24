@@ -37,12 +37,14 @@ use process::PipelineEvent;
 use uninstall::UninstallPreview;
 use version::UpdateCheckResult;
 
-/// 全局状态：web 服务 PID + 日志器 + 卸载预览扫描取消标志。
+/// 全局状态：web 服务 PID + 日志器 + 卸载预览扫描取消标志 + 插件更新检测结果。
 pub struct AppState {
     pub web_pid: Mutex<Option<u32>>,
     pub logger: Logger,
     /// 卸载预览扫描的取消标志（`uninstall_preview` 运行期间存在，取消后清空）。
     pub preview_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// 最近一次插件更新检测结果（默认 profile，供前端徽标展示）。
+    pub plugin_updates: Mutex<Option<plugin::PluginUpdates>>,
 }
 
 // ─────────────────────────────── 命令 ───────────────────────────────
@@ -375,6 +377,19 @@ fn plugin_profiles() -> Vec<String> {
     plugin::list_profiles()
 }
 
+/// 检测指定 profile 已安装第三方插件的更新（npm 查 registry 最新版，github 查最高 tag）。
+#[tauri::command]
+async fn plugin_check_updates(app: AppHandle, profile: String) -> Result<plugin::PluginUpdates, String> {
+    let cfg = config::load_config(&app);
+    let dir = cfg
+        .install_dir
+        .clone()
+        .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
+    tauri::async_runtime::spawn_blocking(move || plugin::check_plugin_updates(&profile, &dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 智能解析输入并安装插件（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。
 /// 完整命令中若带 --profile 则优先于对话框当前 profile。
 #[tauri::command]
@@ -504,6 +519,7 @@ pub fn run() {
             clear_logs,
             plugin_list,
             plugin_profiles,
+            plugin_check_updates,
             plugin_install,
             plugin_update,
             plugin_remove,
@@ -517,6 +533,7 @@ pub fn run() {
                 web_pid: Mutex::new(None),
                 logger: logger.clone(),
                 preview_cancel: Mutex::new(None),
+                plugin_updates: Mutex::new(None),
             });
             logger.info(&crate::i18n::t_fmt(
                 "log.config_loaded",
@@ -556,6 +573,7 @@ pub fn run() {
 }
 
 /// 自动版本检测：启动 4 秒后立即检测一次，之后按配置间隔循环。
+/// 除 DSH 自身更新外，同时检测默认 profile 的插件更新并发出事件（供前端徽标提示）。
 fn spawn_auto_check(handle: AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(4));
@@ -575,6 +593,16 @@ fn spawn_auto_check(handle: AppHandle) {
                                 let _ = handle.emit("update-checked", &result);
                             }
                             Err(_) => { /* 后台检测失败静默，等待下个周期 */ }
+                        }
+                        // 插件更新检测（默认 profile）：失败静默，不阻断 DSH 检测。
+                        let profile = cfg.plugin_profile.trim().to_string();
+                        if !profile.is_empty() {
+                            if let Ok(updates) = plugin::check_plugin_updates(&profile, &dir) {
+                                if let Some(state) = handle.try_state::<AppState>() {
+                                    *state.plugin_updates.lock().unwrap() = Some(updates.clone());
+                                }
+                                let _ = handle.emit("plugin-updates-checked", &updates);
+                            }
                         }
                     }
                 }

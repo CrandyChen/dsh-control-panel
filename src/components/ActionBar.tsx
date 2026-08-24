@@ -20,6 +20,7 @@ import type {
   AppConfig,
   DetectResult,
   Phase,
+  PluginUpdates,
   UpdateCheckResult,
   WebStatus,
 } from "../types";
@@ -42,6 +43,8 @@ interface Props {
   onUninstall: () => void;
   /** 打开插件管理对话框。 */
   onPlugins: () => void;
+  /** 最近一次插件更新检测结果（有为「新版本」的插件时按钮显示 NEW 徽标）。 */
+  pluginUpdates: PluginUpdates | null;
 }
 
 export default function ActionBar({
@@ -59,6 +62,7 @@ export default function ActionBar({
   onTerminal,
   onUninstall,
   onPlugins,
+  pluginUpdates,
 }: Props) {
   const { message, modal } = App.useApp();
   const { t } = useI18n();
@@ -69,6 +73,7 @@ export default function ActionBar({
   const running = ready || starting;
   const busy = phase !== "idle";
   const updateAvailable = config?.updateAvailable ?? false;
+  const pluginUpdateAvailable = (pluginUpdates?.entries ?? []).some((e) => e.updateAvailable);
 
   /** 合并后的「更新」：先检测 → 有新版本弹详情对话框 → 用户选择执行或忽略。 */
   const handleUpdateClick = async () => {
@@ -214,16 +219,24 @@ export default function ActionBar({
         </Button>
       </Tooltip>
 
-      <Tooltip title={t("action.plugins.tip")}>
-        <Button
-          size="large"
-          icon={<AppstoreOutlined />}
-          disabled={!installed || busy}
-          onClick={onPlugins}
+      <Badge count={pluginUpdateAvailable ? "NEW" : 0} color="red" size="small" offset={[-6, 10]}>
+        <Tooltip
+          title={
+            pluginUpdateAvailable
+              ? t("action.plugins.updatesTip")
+              : t("action.plugins.tip")
+          }
         >
-          {t("action.plugins")}
-        </Button>
-      </Tooltip>
+          <Button
+            size="large"
+            icon={<AppstoreOutlined />}
+            disabled={!installed || busy}
+            onClick={onPlugins}
+          >
+            {t("action.plugins")}
+          </Button>
+        </Tooltip>
+      </Badge>
 
       <Tooltip title={t("action.terminal.tip")}>
         <Button

@@ -70,6 +70,8 @@ pub struct AppConfig {
     pub plugin_profile: String,
     /// 「打开界面」的默认打开方式：tab = 程序内新标签页；browser = 系统浏览器。
     pub open_ui_mode: String,
+    /// 界面主题：auto（跟随系统）/ light / dark。选择后持久化，auto 随系统实时切换。
+    pub theme: String,
     /// 界面语言：auto（跟随系统，非中英默认英文）/ zh-CN / en。
     pub language: String,
 }
@@ -90,6 +92,7 @@ impl Default for AppConfig {
             use_pnpm_dsh: true,
             plugin_profile: "web".to_string(),
             open_ui_mode: "tab".to_string(),
+            theme: "auto".to_string(),
             language: "auto".to_string(),
         }
     }

@@ -5,6 +5,7 @@
 
 import {
   AppstoreOutlined,
+  CloudSyncOutlined,
   LinkOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
@@ -29,7 +30,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { AWESOME_PLUGINS_URL } from "../constants";
 import { useI18n } from "../i18n";
-import type { AppConfig, PipelineEvent, PluginEntry, PluginList, PluginOpResult } from "../types";
+import type {
+  AppConfig,
+  PipelineEvent,
+  PluginEntry,
+  PluginList,
+  PluginOpResult,
+  PluginUpdateInfo,
+  PluginUpdates,
+} from "../types";
 
 interface Props {
   open: boolean;
@@ -64,6 +73,9 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
   const [detail, setDetail] = useState<DetailLine[]>([]);
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
+  /** 插件更新检测结果（按 key 索引）。 */
+  const [updates, setUpdates] = useState<PluginUpdates | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   /** 读取指定 profile 的插件列表。 */
   const loadList = useCallback(
@@ -83,6 +95,22 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     [message, t],
   );
 
+  /** 检测当前 profile 的插件更新（网络查询，结果为最新；失败提示但不清空旧结果）。 */
+  const checkUpdates = useCallback(
+    async (p: string) => {
+      setCheckingUpdates(true);
+      try {
+        const u = await api.pluginCheckUpdates(p);
+        setUpdates(u);
+      } catch (e) {
+        message.error(t("plugin.updates.fail", { 0: String(e) }), 5);
+      } finally {
+        setCheckingUpdates(false);
+      }
+    },
+    [message, t],
+  );
+
   // 打开时：同步配置中的 profile 并加载列表，重置操作状态。
   // 仅在打开瞬间读取 config；之后 profile 变更由 saveProfile 自行保存并刷新。
   useEffect(() => {
@@ -92,7 +120,9 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       setDetail([]);
       setDetailOpen(false);
       setInput("");
+      setUpdates(null);
       void loadList(config?.pluginProfile || "web");
+      void checkUpdates(config?.pluginProfile || "web");
       // 拉取本机已有 profile 供下拉框选择（失败时回退为仅当前 profile）。
       void api
         .pluginProfiles()
@@ -247,10 +277,12 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     (p: string) => {
       const v = p.trim() || "web";
       setProfile(v);
+      setUpdates(null);
       void onSaveSettings({ pluginProfile: v });
       void loadList(v);
+      void checkUpdates(v);
     },
-    [onSaveSettings, loadList],
+    [onSaveSettings, loadList, checkUpdates],
   );
 
   /** 推荐插件列表：GitHub 禁止内嵌 iframe，在系统浏览器打开。 */
@@ -271,6 +303,19 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       .sort((a, b) => a.localeCompare(b))
       .map((v) => ({ value: v, label: v }));
   }, [profiles, profile]);
+
+  /** 插件更新结果按 key 索引，供列表行展示「有新版本」。 */
+  const updateMap = useMemo(() => {
+    const m = new Map<string, PluginUpdateInfo>();
+    (updates?.entries ?? []).forEach((e) => m.set(e.key, e));
+    return m;
+  }, [updates]);
+
+  /** 可更新插件数量。 */
+  const updatableCount = useMemo(
+    () => (updates?.entries ?? []).filter((e) => e.updateAvailable).length,
+    [updates],
+  );
 
   const columns: ColumnsType<PluginEntry> = [
     {
@@ -300,14 +345,22 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           record.version && record.spec && record.spec !== record.version
             ? `${record.version} · ${record.spec}`
             : display;
+        const info = updateMap.get(record.key);
         return (
-          <Typography.Text
-            copyable={{ text: display }}
-            style={{ fontFamily: "monospace", fontSize: 12 }}
-            title={tip}
-          >
-            {display || "—"}
-          </Typography.Text>
+          <Flex align="center" gap={6} wrap>
+            <Typography.Text
+              copyable={{ text: display }}
+              style={{ fontFamily: "monospace", fontSize: 12 }}
+              title={tip}
+            >
+              {display || "—"}
+            </Typography.Text>
+            {info?.updateAvailable && (
+              <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                {t("plugin.update.new", { 0: info.latestVersion ?? "" })}
+              </Tag>
+            )}
+          </Flex>
         );
       },
     },
@@ -408,7 +461,6 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
                   ["plugin.guide.npmv.label", "plugin.guide.npmv.example"],
                   ["plugin.guide.github.label", "plugin.guide.github.example"],
                   ["plugin.guide.url.label", "plugin.guide.url.example"],
-                  ["plugin.guide.tarball.label", "plugin.guide.tarball.example"],
                   ["plugin.guide.cmd.label", "plugin.guide.cmd.example"],
                 ] as const
               ).map(([labelKey, exampleKey]) => (
@@ -453,9 +505,29 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         </Flex>
 
         {/* 已安装的第三方插件列表 */}
-        <Typography.Text strong style={{ fontSize: 13 }}>
-          {t("plugin.installed.title")}
-        </Typography.Text>
+        <Flex justify="space-between" align="center" gap={8} wrap>
+          <Typography.Text strong style={{ fontSize: 13 }}>
+            {t("plugin.installed.title")}
+          </Typography.Text>
+          <Flex align="center" gap={8} wrap>
+            {checkingUpdates && <Spin size="small" />}
+            {updates && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {updatableCount > 0
+                  ? t("plugin.updates.found", { 0: updatableCount })
+                  : t("plugin.updates.none")}
+              </Typography.Text>
+            )}
+            <Button
+              size="small"
+              icon={<CloudSyncOutlined />}
+              disabled={busy || checkingUpdates}
+              onClick={() => void checkUpdates(profile)}
+            >
+              {t("plugin.checkUpdates")}
+            </Button>
+          </Flex>
+        </Flex>
         {loading ? (
           <Flex justify="center" style={{ padding: 24 }}>
             <Spin />

@@ -367,6 +367,10 @@ pub fn t_or(key: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// 这些测试读/写全局语言 `CURRENT`，并行执行会互相干扰（race）。用锁串行化。
+    static LANG_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn lang_from_config_maps_zh_and_others() {
@@ -381,6 +385,7 @@ mod tests {
 
     #[test]
     fn t_or_falls_back_to_fallback_for_unknown_keys() {
+        let _g = LANG_LOCK.lock().unwrap();
         set_lang(Lang::Zh);
         // 已知 key：取目录文案。
         assert_eq!(t_or("step.clone", "克隆仓库（git clone）"), "克隆仓库（git clone）");
@@ -393,6 +398,7 @@ mod tests {
 
     #[test]
     fn t_returns_current_language_text() {
+        let _g = LANG_LOCK.lock().unwrap();
         set_lang(Lang::Zh);
         assert_eq!(t("plugin.running"), "web 服务正在运行，请先停止服务后再更新/卸载插件；安装新插件不受限制");
         set_lang(Lang::En);
@@ -403,6 +409,7 @@ mod tests {
 
     #[test]
     fn t_fmt_fills_positional_placeholders() {
+        let _g = LANG_LOCK.lock().unwrap();
         set_lang(Lang::Zh);
         assert_eq!(
             t_fmt("plugin.profile.invalid", &["a/b"]),

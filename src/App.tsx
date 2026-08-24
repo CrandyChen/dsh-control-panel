@@ -87,6 +87,27 @@ function Shell({
     if (effective !== lang) onLang(effective);
   }, [l.config?.language, lang, onLang]);
 
+  // 主题：按配置（auto/light/dark）解析并应用。auto 跟随系统偏好。
+  useEffect(() => {
+    const setting = l.config?.theme ?? "auto";
+    const d =
+      setting === "dark"
+        ? true
+        : setting === "light"
+          ? false
+          : (window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
+    onTheme(d);
+  }, [l.config?.theme, onTheme]);
+
+  // auto 模式：监听系统主题变化，实时切换深浅。
+  useEffect(() => {
+    if ((l.config?.theme ?? "auto") !== "auto") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = (e: MediaQueryListEvent) => onTheme(e.matches);
+    mq.addEventListener?.("change", handler);
+    return () => mq.removeEventListener?.("change", handler);
+  }, [l.config?.theme, onTheme]);
+
   // dayjs / 文档标题 / 窗口标题随语言切换。
   useEffect(() => {
     dayjs.locale(lang === "zh-CN" ? "zh-cn" : "en");
@@ -210,11 +231,16 @@ function Shell({
           paddingInline: 24,
           borderBottom: `1px solid ${token.colorBorderSecondary}`,
           flexShrink: 0,
+          // 顶栏背景随主题：深色主题沿用深底，浅色主题用浅底，确保标题文字清晰可读。
+          background: dark ? "#001529" : "#f5f5f5",
         }}
       >
         <Flex align="center" gap={12}>
           <ThunderboltOutlined style={{ fontSize: 22, color: token.colorPrimary }} />
-          <Typography.Title level={4} style={{ margin: 0, whiteSpace: "nowrap" }}>
+          <Typography.Title
+            level={4}
+            style={{ margin: 0, whiteSpace: "nowrap", color: token.colorTextHeading }}
+          >
             DSH Control Panel
           </Typography.Title>
           <Tag style={{ marginInlineEnd: 0 }}>{t("app.tag")}</Tag>
@@ -297,6 +323,7 @@ function Shell({
                 void l.loadPreview();
               }}
               onPlugins={() => setPluginsOpen(true)}
+              pluginUpdates={l.pluginUpdates}
             />
 
             <Space direction="vertical" size={4} style={{ width: "100%" }}>
@@ -365,10 +392,8 @@ function Shell({
       <SettingsDrawer
         open={settingsOpen}
         config={l.config}
-        dark={dark}
         onClose={() => setSettingsOpen(false)}
         onSave={l.saveSettings}
-        onTheme={onTheme}
       />
 
       <PluginManagerDialog
