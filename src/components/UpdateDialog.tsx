@@ -4,7 +4,7 @@
 import { CloudSyncOutlined } from "@ant-design/icons";
 import { Alert, Button, Descriptions, Flex, Modal, Space, Tag, Typography } from "antd";
 import { useI18n } from "../i18n";
-import type { UpdateCheckResult } from "../types";
+import type { InstallMode, UpdateCheckResult } from "../types";
 
 interface Props {
   result: UpdateCheckResult;
@@ -12,6 +12,8 @@ interface Props {
   currentVersion: string | null;
   /** web 服务是否在运行（运行中提示更新前会自动停止）。 */
   webRunning: boolean;
+  /** 安装方式（源码 / 预构建，决定更新步骤文案）。 */
+  installMode: InstallMode;
   /** 是否正在执行更新（对话框保持打开并显示进度提示）。 */
   updating: boolean;
   onIgnore: () => void;
@@ -22,11 +24,16 @@ export default function UpdateDialog({
   result,
   currentVersion,
   webRunning,
+  installMode,
   updating,
   onIgnore,
   onUpdate,
 }: Props) {
   const { t } = useI18n();
+  const steps =
+    installMode === "prebuilt"
+      ? t("update.steps.prebuilt")
+      : t("update.steps");
   return (
     <Modal
       title={
@@ -111,7 +118,7 @@ export default function UpdateDialog({
           ]}
         />
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {t("update.steps")}
+          {steps}
         </Typography.Text>
       </Space>
     </Modal>

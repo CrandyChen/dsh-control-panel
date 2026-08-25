@@ -13,7 +13,7 @@ import {
   ReloadOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
-import { App, Badge, Button, Flex, Space, Tooltip } from "antd";
+import { App, Badge, Button, Flex, Space, Tooltip, theme } from "antd";
 import { useState } from "react";
 import { useI18n } from "../i18n";
 import type {
@@ -65,6 +65,7 @@ export default function ActionBar({
   pluginUpdates,
 }: Props) {
   const { message, modal } = App.useApp();
+  const { token } = theme.useToken();
   const { t } = useI18n();
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const installed = detect?.installed ?? false;
@@ -73,6 +74,7 @@ export default function ActionBar({
   const running = ready || starting;
   const busy = phase !== "idle";
   const updateAvailable = config?.updateAvailable ?? false;
+  const installMode = config?.installMode ?? "prebuilt";
   const pluginUpdateAvailable = (pluginUpdates?.entries ?? []).some((e) => e.updateAvailable);
 
   /** 合并后的「更新」：先检测 → 有新版本弹详情对话框 → 用户选择执行或忽略。 */
@@ -88,6 +90,17 @@ export default function ActionBar({
   };
 
   const confirmRepair = () => {
+    const stepsLine =
+      installMode === "prebuilt" ? (
+        <>
+          <code>下载最新预构建内核</code> → <code>解压</code> → <code>修复插件</code>
+        </>
+      ) : (
+        <>
+          <code>git reset --hard</code> → <code>git clean</code> →{" "}
+          <code>pnpm install</code> → <code>pnpm run build</code>
+        </>
+      );
     modal.confirm({
       title: t("action.repair.confirm.title"),
       width: 560,
@@ -95,8 +108,7 @@ export default function ActionBar({
         <div style={{ fontSize: 13, lineHeight: 1.9 }}>
           {t("action.repair.confirm.steps")}
           <br />
-          <code>git reset --hard</code> → <code>git clean</code> →{" "}
-          <code>pnpm install</code> → <code>pnpm run build</code>
+          {stepsLine}
           <br />
           {t("action.repair.confirm.esc")}
           <br />
@@ -263,8 +275,8 @@ export default function ActionBar({
 
       {busy && (
         <Space>
-          <ReloadOutlined spin style={{ color: "#1677ff" }} />
-          <span style={{ color: "rgba(255,255,255,0.65)", fontSize: 13 }}>
+          <ReloadOutlined spin style={{ color: token.colorPrimary }} />
+          <span style={{ color: token.colorTextSecondary, fontSize: 13 }}>
             {t("action.busy")}
           </span>
         </Space>
@@ -275,6 +287,7 @@ export default function ActionBar({
           result={updateResult}
           currentVersion={detect?.version ?? config?.installedVersion ?? null}
           webRunning={running}
+          installMode={installMode}
           updating={phase === "updating"}
           onIgnore={() => setUpdateResult(null)}
           onUpdate={() => {

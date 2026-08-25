@@ -370,24 +370,70 @@ fn reinstall(
 
 // ─────────────────────────────── 入口 ───────────────────────────────
 
-/// 修复安装主流程（分级升级，见模块文档）。
+/// 修复安装主流程（按安装方式分派，见模块文档）。
 pub fn repair(
     app: &AppHandle,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
-    // L0：前置校验（网络 / 安装目录 / 运行环境）。
-    crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
     let cfg = config::load_config(app);
+    let mode = cfg.install_mode.clone();
     let dir = cfg
         .install_dir
         .clone()
         .ok_or_else(|| AppError::NotInstalled.friendly())?;
     let path = PathBuf::from(&dir);
-    if !is_valid_repo(&path) {
-        return Err(AppError::NotInstalled.friendly());
+
+    if mode == "source" {
+        if !is_valid_repo(&path) {
+            return Err(AppError::NotInstalled.friendly());
+        }
+        repair_source(app, &dir, &path, channel, logger)?;
+    } else {
+        if !crate::detect::is_valid_prebuilt(&path) {
+            return Err(AppError::NotInstalled.friendly());
+        }
+        repair_prebuilt(app, channel, logger)?;
     }
-    let missing: Vec<String> = crate::tools::detect_tools()
+
+    // L4：profile 依赖修复（best-effort，不阻断主流程；两模式共用）。
+    repair_profiles(app, channel, logger);
+
+    // 收尾：更新配置。
+    let mut cfg = config::load_config(app);
+    if mode == "source" {
+        cfg.installed_version = crate::detect::read_version(&path);
+        cfg.installed_commit = crate::version::read_commit(&path);
+    } else {
+        // 预构建内核：重新定位 dsh 根并读取版本。
+        if let Ok(root) = crate::prebuilt::locate_dsh_root(&config::mode2_install_dir()) {
+            cfg.install_dir = Some(root.to_string_lossy().to_string());
+            cfg.installed_version = crate::detect::read_pkg_version(&root);
+        }
+        cfg.installed_commit = None;
+    }
+    cfg.last_updated_at = Some(config::now_string());
+    cfg.update_available = false;
+    cfg.latest_commit = None;
+    cfg.latest_subject = None;
+    config::save_config(app, &cfg).map_err(|e| e)?;
+
+    let _ = channel.send(PipelineEvent::Finished { ok: true });
+    logger.info(&crate::i18n::t("log.repair_done"));
+    Ok(())
+}
+
+/// 源码模式修复：前置校验（网络 / git）→ L1 清理 → L2/L3 重建 → L5 保底重装。
+fn repair_source(
+    app: &AppHandle,
+    dir: &str,
+    path: &PathBuf,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    // L0：前置校验（网络 / 运行环境）。git 缺失或版本过低时给出提示。
+    crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
+    let missing: Vec<String> = crate::tools::detect_tools("source")
         .iter()
         .filter(|t| t.required && (!t.installed || !t.ok))
         .map(|t| t.id.clone())
@@ -399,8 +445,8 @@ pub fn repair(
     // L1：清理异常状态。
     logger.info(&crate::i18n::t("log.repair_start"));
     let _ = crate::web::stop_web(app);
-    kill_stray_processes(&dir, logger);
-    let locks = git_lock_files(&path);
+    kill_stray_processes(dir, logger);
+    let locks = git_lock_files(path);
     if !locks.is_empty() {
         for l in &locks {
             let _ = if l.is_dir() {
@@ -418,34 +464,75 @@ pub fn repair(
     }
 
     // L2 → L3 重建（失败逐级升级）。
-    let rebuilt = if try_rebuild(&path, channel, logger).is_ok() {
+    let rebuilt = if try_rebuild(path, channel, logger).is_ok() {
         true
     } else {
         logger.warn(&crate::i18n::t("log.repair_escalate"));
-        deep_rebuild(&path, channel, logger).is_ok()
+        deep_rebuild(path, channel, logger).is_ok()
     };
 
     // L5 保底重装（前两级都失败才触发）。
     if !rebuilt {
         logger.error(&crate::i18n::t("log.repair_last_resort_escalate"));
-        reinstall(&dir, &path, channel, logger)?;
+        reinstall(dir, path, channel, logger)?;
     }
 
-    // L4：profile 依赖修复（best-effort，不阻断主流程）。
-    repair_profiles(app, channel, logger);
+    Ok(())
+}
 
-    // 收尾：更新配置。
-    let mut cfg = config::load_config(app);
-    cfg.installed_version = crate::detect::read_version(&path);
-    cfg.installed_commit = crate::version::read_commit(&path);
-    cfg.last_updated_at = Some(config::now_string());
-    cfg.update_available = false;
-    cfg.latest_commit = None;
-    cfg.latest_subject = None;
-    config::save_config(app, &cfg).map_err(|e| e)?;
+/// 预构建模式修复：停 web → 清理残留进程 → 重新下载最新内核并解压。
+fn repair_prebuilt(
+    app: &AppHandle,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    let dir = config::mode2_install_dir().to_string_lossy().to_string();
+    logger.info(&crate::i18n::t("log.repair_start"));
+    let _ = crate::web::stop_web(app);
+    kill_stray_processes(&dir, logger);
 
-    let _ = channel.send(PipelineEvent::Finished { ok: true });
-    logger.info(&crate::i18n::t("log.repair_done"));
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "download".into(),
+        title: crate::i18n::t("step.download"),
+    });
+    let release = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
+    let tmp = std::env::temp_dir().join("dsh-prebuilt-repair.zip");
+    crate::prebuilt::download_asset(&release.url, &tmp, release.size, channel, "download")
+        .map_err(|e| e.friendly())?;
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "download".into(),
+        exit_code: 0,
+    });
+
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "extract".into(),
+        title: crate::i18n::t("step.extract"),
+    });
+    crate::prebuilt::extract_zip_with_progress(&tmp, &config::mode2_install_dir(), channel, "extract")
+        .map_err(|e| e.friendly())?;
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "extract".into(),
+        exit_code: 0,
+    });
+
+    // 解压完整性校验：关键入口缺失说明解压不完整，删除损坏目录并报错。
+    let dest = config::mode2_install_dir();
+    if let Ok(root) = crate::prebuilt::locate_dsh_root(&dest) {
+        if let Err(e) = crate::prebuilt::verify_prebuilt_root(&root) {
+            let _ = std::fs::remove_dir_all(&dest);
+            return Err(e.friendly());
+        }
+        // profile bundle 校准：移除其它发行版残留的、当前内核无法解析的 bundle。
+        for (profile, removed) in crate::plugin::reconcile_all_profiles(&root) {
+            if !removed.is_empty() {
+                logger.warn(&crate::i18n::t_fmt(
+                    "log.profile_reconcile",
+                    &[&profile, &removed.join("、")],
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 

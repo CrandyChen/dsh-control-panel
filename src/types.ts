@@ -1,7 +1,12 @@
 // 前后端共享类型（与 Rust 侧 serde 字段对齐，camelCase）。
 
+/** DSH 安装方式：source = 从官方源码安装（需 Git）；prebuilt = 预构建内核（免 Git/pnpm）。 */
+export type InstallMode = "source" | "prebuilt";
+
 export interface AppConfig {
   installDir: string | null;
+  /** 当前安装方式（source / prebuilt）。 */
+  installMode: InstallMode;
   installedVersion: string | null;
   installedCommit: string | null;
   lastUpdatedAt: string | null;
@@ -34,15 +39,15 @@ export interface DetectResult {
   installedCommit: string | null;
 }
 
-/** 运行环境工具检测结果（与 Rust tools.rs 的 ToolStatus 对齐）。 */
+/** 运行环境工具检测结果（与 Rust tools.rs 的 ToolStatus 对齐；现仅检测源码模式的 Git）。 */
 export interface ToolStatus {
   id: string;
   name: string;
   installed: boolean;
   version: string | null;
-  /** 版本是否满足最低要求（git/python 无要求时与 installed 一致）。 */
+  /** 版本是否满足最低要求（git 无要求时与 installed 一致）。 */
   ok: boolean;
-  /** 是否必装（git/node/pnpm 为 true；python 为推荐项 false）。 */
+  /** 是否必装（git 为 true；预构建模式不返回此项）。 */
   required: boolean;
   detail: string | null;
 }
@@ -76,7 +81,15 @@ export type PipelineEvent =
   | { type: "output"; step: string; stream: "stdout" | "stderr"; line: string }
   | { type: "stepFinished"; id: string; exitCode: number }
   | { type: "error"; message: string }
-  | { type: "finished"; ok: boolean };
+  | { type: "finished"; ok: boolean }
+  | {
+      /** 预构建内核下载进度（received/total 为字节；speedBps 为平均速度）。 */
+      type: "downloadProgress";
+      step: string;
+      received: number;
+      total: number;
+      speedBps: number;
+    };
 
 export type WebStatus = "idle" | "starting" | "ready" | "stopped" | "error";
 

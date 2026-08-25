@@ -14,6 +14,9 @@ pub enum AppError {
     PortInUse(u16),
     InvalidPath(String),
     NotValidInstall(String),
+    NotValidPrebuilt(String),
+    /// 预构建内核下载失败（网络 / 资产缺失 / 代理等）。
+    PrebuiltDownload(String),
     NotInPreview(String),
     Io(String),
 }
@@ -52,6 +55,12 @@ impl AppError {
             AppError::NotValidInstall(p) => {
                 format!("{p} 不是有效的 DeepSeek Harness 安装（需包含 .git 与 @deepseek-ai/dsh-root 标识）。GitHub zip 解压的目录无法更新，不在支持范围。")
             }
+            AppError::NotValidPrebuilt(p) => {
+                format!("{p} 不是有效的预构建内核安装（缺少 node_modules\\\\.bin\\\\dsh.cmd）。请删除该目录后重新安装（模式二）。")
+            }
+            AppError::PrebuiltDownload(msg) => {
+                format!("下载预构建内核失败：{msg}。请检查网络、代理或 VPN 设置后重试。")
+            }
             AppError::NotInPreview(p) => format!("路径不在卸载清单内，已拒绝删除：{p}"),
             AppError::Io(msg) => format!("文件操作失败：{msg}"),
         }
@@ -82,6 +91,12 @@ impl AppError {
             AppError::InvalidPath(p) => format!("Invalid path, operation rejected: {p}"),
             AppError::NotValidInstall(p) => format!(
                 "{p} is not a valid DeepSeek Harness installation (requires .git and the @deepseek-ai/dsh-root marker). Directories extracted from GitHub zip cannot be updated and are not supported."
+            ),
+            AppError::NotValidPrebuilt(p) => format!(
+                "{p} is not a valid prebuilt kernel installation (missing node_modules\\.bin\\dsh.cmd). Delete the directory and reinstall (mode 2)."
+            ),
+            AppError::PrebuiltDownload(msg) => format!(
+                "Failed to download the prebuilt kernel: {msg}. Check your network, proxy or VPN settings and retry."
             ),
             AppError::NotInPreview(p) => format!("Path is not in the uninstall list, deletion rejected: {p}"),
             AppError::Io(msg) => format!("File operation failed: {msg}"),

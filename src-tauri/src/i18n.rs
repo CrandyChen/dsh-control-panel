@@ -175,6 +175,10 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "step.build" => ("构建（pnpm run build）", "Build (pnpm run build)"),
         "step.pull" => ("拉取最新代码（git pull --ff-only）", "Pull latest code (git pull --ff-only)"),
         "step.web" => ("启动 web 服务（pnpm dsh web）", "Start web service (pnpm dsh web)"),
+        "step.web.prebuilt" => (
+            "启动 web 服务（node_modules\\.bin\\dsh.cmd web）",
+            "Start web service (node_modules\\.bin\\dsh.cmd web)",
+        ),
         "step.repair-fetch" => ("拉取远程引用（git fetch origin）", "Fetch remote refs (git fetch origin)"),
         "step.repair-reset" => ("重置到远程默认分支（git reset --hard）", "Reset to remote default branch (git reset --hard)"),
         "step.repair-clean" => ("清理多余文件（git clean）", "Clean extra files (git clean)"),
@@ -184,6 +188,8 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "step.repair-remove" => ("删除损坏的安装目录（保底重装）", "Delete corrupted installation directory (last-resort reinstall)"),
         "step.repair-clone" => ("重新克隆仓库（git clone）", "Re-clone repository (git clone)"),
         "step.delete" => ("删除 {0}", "Delete {0}"),
+        "step.download" => ("下载预构建内核", "Download prebuilt kernel"),
+        "step.extract" => ("解压预构建内核", "Extract prebuilt kernel"),
         // ── 控制面板自身日志（Logger 正文，按界面语言输出）──
         "log.boot" => ("=== DSH Control Panel v{0} 启动 ===", "=== DSH Control Panel v{0} started ==="),
         "log.os" => (
@@ -314,6 +320,10 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "🚀 启动 DeepSeek Harness web 服务（pnpm dsh web）",
             "🚀 Starting DeepSeek Harness web service (pnpm dsh web)",
         ),
+        "log.web_start_prebuilt" => (
+            "🚀 启动 DeepSeek Harness web 服务（node_modules\\.bin\\dsh.cmd web）",
+            "🚀 Starting DeepSeek Harness web service (node_modules\\.bin\\dsh.cmd web)",
+        ),
         "log.web_pid" => ("进程 PID: {0}", "Process PID: {0}"),
         "log.web_stop_noop" => (
             "⏹ 停止 web 服务：未发现运行中的进程",
@@ -322,6 +332,31 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "log.web_stop_killed" => (
             "⏹ 停止 web 服务：已结束进程 {0}",
             "⏹ Stop web service: terminated process(es) {0}",
+        ),
+        "log.prebuilt_start" => (
+            "🚀 开始下载预构建内核…",
+            "🚀 Starting to download the prebuilt kernel…",
+        ),
+        "log.prebuilt_done" => (
+            "✅ 预构建内核安装完成（目录: {0}）",
+            "✅ Prebuilt kernel installed (directory: {0})",
+        ),
+        "log.prebuilt_update_start" => (
+            "🚀 开始更新预构建内核…",
+            "🚀 Starting to update the prebuilt kernel…",
+        ),
+        "log.prebuilt_download_retry" => (
+            "⚠ 下载失败，自动重试一次：{0}",
+            "⚠ Download failed; retrying once: {0}",
+        ),
+        "log.profile_reconcile" => (
+            "🔧 已校准 profile「{0}」的 bundle：移除了内核无法解析的 {1}",
+            "🔧 Reconciled bundles of profile \"{0}\": removed {1} that the kernel cannot resolve",
+        ),
+        // ── web 启动快速退出 ──
+        "web.quick_exit" => (
+            "DeepSeek Harness 启动后立即退出（退出码 {0}）。请查看下方日志中的错误输出；若与 profile 插件/依赖有关，可执行「修复安装」。",
+            "DeepSeek Harness exited right after starting (exit code {0}). Check the error output in the log below; if it is related to profile plugins or dependencies, run \"Repair Install\".",
         ),
         _ => return None,
     })

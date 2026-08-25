@@ -1,13 +1,9 @@
-import { SettingOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import {
   App as AntApp,
-  Badge,
-  Button,
   ConfigProvider,
-  Flex,
   Layout,
+  Progress,
   Space,
-  Tag,
   Typography,
   theme,
 } from "antd";
@@ -33,6 +29,7 @@ import { I18nContext, detectSystemLang, makeT, useI18n } from "./i18n";
 import type { Lang } from "./i18n";
 import { buildInstallGuideHtml } from "./installGuide";
 import type { ToolStatus } from "./types";
+import { formatSize } from "./types";
 import { usePanel } from "./usePanel";
 
 export default function App() {
@@ -48,7 +45,7 @@ export default function App() {
     >
       <AntApp>
         <I18nContext.Provider value={{ lang, t: makeT(lang) }}>
-          <Shell dark={dark} onTheme={setDark} lang={lang} onLang={setLang} />
+          <Shell onTheme={setDark} lang={lang} onLang={setLang} />
         </I18nContext.Provider>
       </AntApp>
     </ConfigProvider>
@@ -56,17 +53,14 @@ export default function App() {
 }
 
 function Shell({
-  dark,
   onTheme,
   lang,
   onLang,
 }: {
-  dark: boolean;
   onTheme: (d: boolean) => void;
   lang: Lang;
   onLang: (l: Lang) => void;
 }) {
-  const { token } = theme.useToken();
   const { message } = AntApp.useApp();
   const { t } = useI18n();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -145,43 +139,25 @@ function Shell({
     openGuideTab(tools);
   }, [l.tools, openGuideTab]);
 
-  /** 点击「安装」：先做一次新鲜的环境检测；必装项缺失则打开指引 tab 而非安装弹窗。 */
+  /** 点击「安装」：源码模式先做环境检测，git 缺失则打开指引 tab；预构建模式直接安装。 */
   const onInstallClick = useCallback(async () => {
-    let tools: ToolStatus[] = l.tools ?? [];
-    try {
-      tools = await api.detectTools();
-    } catch {
-      // 检测失败时沿用缓存结果，不阻塞主流程。
-    }
-    const blocked = tools.some((t) => t.required && (!t.installed || !t.ok));
-    if (blocked) {
-      message.warning(t("msg.envBlocked"));
-      openGuideTab(tools);
-      return;
+    const mode = l.config?.installMode ?? "prebuilt";
+    if (mode === "source") {
+      let tools: ToolStatus[] = l.tools ?? [];
+      try {
+        tools = await api.detectTools();
+      } catch {
+        // 检测失败时沿用缓存结果，不阻塞主流程。
+      }
+      const blocked = tools.some((t) => t.required && (!t.installed || !t.ok));
+      if (blocked) {
+        message.warning(t("msg.envBlocked"));
+        openGuideTab(tools);
+        return;
+      }
     }
     setInstallOpen(true);
-  }, [l.tools, message, openGuideTab, t]);
-
-  /** 「检测运行环境」：拉取新鲜检测结果，刷新标签并给出摘要提示。 */
-  const handleDetectTools = useCallback(async () => {
-    try {
-      const tools = await l.refreshTools();
-      const missing = tools.filter((t) => !t.installed || !t.ok);
-      if (missing.length === 0) {
-        message.success(t("status.detect.ok"));
-      } else {
-        message.warning(
-          t("status.detect.issues", {
-            0: missing.length,
-            1: missing.map((t) => t.name).join("、"),
-          }),
-          5,
-        );
-      }
-    } catch (e) {
-      message.error(t("status.detect.fail", { 0: String(e) }));
-    }
-  }, [l.refreshTools, message, t]);
+  }, [l.config?.installMode, l.tools, message, openGuideTab, t]);
 
   /** 「打开界面」：按配置的默认方式分发（tab = 程序内新标签页，browser = 系统浏览器）。 */
   const handleOpenUi = useCallback(() => {
@@ -223,43 +199,6 @@ function Shell({
 
   return (
     <Layout style={{ height: "100vh", overflow: "hidden" }}>
-      <Layout.Header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          paddingInline: 24,
-          borderBottom: `1px solid ${token.colorBorderSecondary}`,
-          flexShrink: 0,
-          // 顶栏背景随主题：深色主题沿用深底，浅色主题用浅底，确保标题文字清晰可读。
-          background: dark ? "#001529" : "#f5f5f5",
-        }}
-      >
-        <Flex align="center" gap={12}>
-          <ThunderboltOutlined style={{ fontSize: 22, color: token.colorPrimary }} />
-          <Typography.Title
-            level={4}
-            style={{ margin: 0, whiteSpace: "nowrap", color: token.colorTextHeading }}
-          >
-            DSH Control Panel
-          </Typography.Title>
-          <Tag style={{ marginInlineEnd: 0 }}>{t("app.tag")}</Tag>
-          {l.config?.updateAvailable && (
-            <Badge
-              status="error"
-              text={
-                <span style={{ color: token.colorError, fontSize: 13 }}>
-                  {t("app.newVersion")}
-                </span>
-              }
-            />
-          )}
-        </Flex>
-        <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>
-          {t("app.settings")}
-        </Button>
-      </Layout.Header>
-
       {hasTabs && (
         <WebTabBar
           tabs={l.tabs}
@@ -296,12 +235,10 @@ function Shell({
             <StatusCard
               config={l.config}
               detect={l.detect}
-              tools={l.tools}
               webStatus={l.webStatus}
               lastCheck={l.lastCheck}
               busy={busy}
-              onOpenGuide={handleOpenGuide}
-              onDetectTools={handleDetectTools}
+              onOpenSettings={() => setSettingsOpen(true)}
             />
 
             <ActionBar
@@ -325,6 +262,43 @@ function Shell({
               onPlugins={() => setPluginsOpen(true)}
               pluginUpdates={l.pluginUpdates}
             />
+
+            {/* 预构建内核下载 / 解压进度（安装 / 更新 / 修复预构建模式时实时显示） */}
+            {l.progress && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <Progress
+                  size="small"
+                  status="active"
+                  percent={
+                    l.progress.total > 0
+                      ? Math.min(100, Math.round((l.progress.received / l.progress.total) * 100))
+                      : undefined
+                  }
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {(() => {
+                    const p = l.progress;
+                    const key =
+                      p.step === "extract"
+                        ? p.total > 0
+                          ? "extract.progress"
+                          : "extract.progress.unknown"
+                        : p.total > 0
+                          ? "download.progress"
+                          : "download.progress.unknown";
+                    return p.total > 0
+                      ? t(key, {
+                          0: formatSize(p.received),
+                          1: formatSize(p.total),
+                          2: Math.round((p.received / p.total) * 100),
+                        })
+                      : t(key, {
+                          0: formatSize(p.received),
+                        });
+                  })()}
+                </Typography.Text>
+              </div>
+            )}
 
             <Space direction="vertical" size={4} style={{ width: "100%" }}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -350,12 +324,13 @@ function Shell({
       <InstallModal
         open={installOpen}
         tools={l.tools}
+        installMode={l.config?.installMode ?? "prebuilt"}
         onOpenGuide={handleOpenGuide}
         onCancel={() => setInstallOpen(false)}
-        onConfirm={async (dir) => {
+        onConfirm={async (dir, mode) => {
           // 点击「开始安装」后立即关闭对话框：进度与报错在日志面板实时展示。
           setInstallOpen(false);
-          void l.install(dir);
+          void l.install(dir, mode);
         }}
       />
 
