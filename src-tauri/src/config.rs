@@ -13,6 +13,69 @@ pub const REPO_URL: &str = "https://github.com/deepseek-ai/deepseek-harness.git"
 pub const WEB_URL: &str = "http://127.0.0.1:3080";
 pub const WEB_PORT: u16 = 3080;
 
+/// 预构建内核（模式二）发布仓库：GitHub API 最新 release 与资产名。
+pub const PREBUILT_PKG_API: &str =
+    "https://api.github.com/repos/dsh-tauri-desk/deepseek-harness-pkg/releases/latest";
+pub const PREBUILT_PKG_ASSET: &str = "deepseek-harness-pkg-windows.zip";
+
+/// 预构建内核（模式二）解压到的子目录名（位于程序运行目录下）。
+pub const MODE2_DIR: &str = "dsh";
+
+/// 便携内置运行时子目录名（Node.js + pnpm，位于程序运行目录下）。
+pub const RUNTIME_DIR: &str = "runtime";
+
+/// 是否使用内置运行时（runtime 目录存在且有 node.exe）。
+pub fn runtime_exists() -> bool {
+    let dir = exe_dir().join(RUNTIME_DIR);
+    dir.join("node.exe").is_file()
+}
+
+/// 便携内置运行时目录（程序运行目录下的 runtime）。
+pub fn runtime_dir() -> PathBuf {
+    exe_dir().join(RUNTIME_DIR)
+}
+
+/// 预构建内核（模式二）安装目录：程序运行目录下的 dsh 子目录。
+pub fn mode2_install_dir() -> PathBuf {
+    exe_dir().join(MODE2_DIR)
+}
+
+/// 源码安装（模式一）父目录默认值：程序运行目录（用户可修改）。
+pub fn mode1_default_parent() -> PathBuf {
+    exe_dir()
+}
+
+/// 子进程 PATH：优先把内置运行时目录前置（便携模式），否则返回系统 PATH。
+pub fn augmented_path() -> String {
+    let sys = std::env::var("PATH").unwrap_or_default();
+    if runtime_exists() {
+        let rt = runtime_dir();
+        let rt_str = rt.to_string_lossy().to_string();
+        if rt_str.is_empty() {
+            return sys;
+        }
+        format!("{rt_str};{sys}")
+    } else {
+        sys
+    }
+}
+
+/// 内置 pnpm 的可执行完整路径（便携运行时目录下的 pnpm），不存在时返回 None。
+/// 用于保证源码安装等场景**优先使用自带 pnpm**（目标用户可能未全局安装 node/pnpm）。
+pub fn bundled_pnpm_path() -> Option<String> {
+    if !runtime_exists() {
+        return None;
+    }
+    let rt = runtime_dir();
+    for name in ["pnpm.exe", "pnpm.cmd"] {
+        let p = rt.join(name);
+        if p.is_file() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 /// 实际使用的仓库地址：默认官方地址；可用环境变量 DSH_CONTROL_PANEL_REPO_URL 覆盖（镜像源 / 测试），
 /// 兼容旧名 DSH_LAUNCHER_REPO_URL。
 pub fn repo_url() -> String {
@@ -46,6 +109,8 @@ pub fn repo_dir_name() -> String {
 pub struct AppConfig {
     /// 安装目录（用户选择）。
     pub install_dir: Option<String>,
+    /// 安装方式：source（从官方源码安装，需 Git）/ prebuilt（预构建内核，免 Git/pnpm）。
+    pub install_mode: String,
     /// 当前安装版本（读自 apps/cli/package.json）。
     pub installed_version: Option<String>,
     /// 当前安装 commit。
@@ -80,6 +145,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             install_dir: None,
+            install_mode: "prebuilt".to_string(),
             installed_version: None,
             installed_commit: None,
             last_updated_at: None,
@@ -117,12 +183,30 @@ pub fn config_path(_app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(exe_dir().join("config.json"))
 }
 
+/// 依据安装目录的实际形态推断安装方式（源码头 → source；预构建 dsh.cmd → prebuilt）。
+/// 无安装目录 / 无法识别时回退默认 prebuilt。幂等：与磁盘现状保持一致。
+fn infer_install_mode(install_dir: Option<&str>) -> String {
+    match install_dir {
+        Some(dir) => {
+            let p = PathBuf::from(dir);
+            if crate::detect::is_valid_repo(&p) {
+                "source".to_string()
+            } else if crate::detect::is_valid_prebuilt(&p) {
+                "prebuilt".to_string()
+            } else {
+                "prebuilt".to_string()
+            }
+        }
+        None => "prebuilt".to_string(),
+    }
+}
+
 pub fn load_config(app: &tauri::AppHandle) -> AppConfig {
     let path = match config_path(app) {
         Ok(p) => p,
         Err(_) => return AppConfig::default(),
     };
-    match fs::read_to_string(&path) {
+    let cfg = match fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
         Err(_) => {
             // 新位置无配置：若旧位置存在则迁移（保留已采用的安装目录等参数）。
@@ -138,7 +222,11 @@ pub fn load_config(app: &tauri::AppHandle) -> AppConfig {
             }
             AppConfig::default()
         }
-    }
+    };
+    // 修正 install_mode：与磁盘现状保持一致（可能因手动处理或旧配置而不准）。
+    let mut cfg = cfg;
+    cfg.install_mode = infer_install_mode(cfg.install_dir.as_deref());
+    cfg
 }
 
 pub fn save_config(app: &tauri::AppHandle, cfg: &AppConfig) -> Result<(), String> {

@@ -38,6 +38,13 @@ pub enum PipelineEvent {
     StepFinished { id: String, exit_code: i32 },
     Error { message: String },
     Finished { ok: bool },
+    /// 预构建内核下载进度（received/total 为字节；speed_bps 为滑动窗口平均速度）。
+    DownloadProgress {
+        step: String,
+        received: u64,
+        total: u64,
+        speed_bps: u64,
+    },
 }
 
 /// 流水线中的一个步骤。
@@ -51,17 +58,32 @@ pub struct Step {
 }
 
 /// 依次尝试多个程序名（如 ["pnpm.cmd", "pnpm"]），以兼容不同安装方式。
+/// 子进程统一使用内置运行时 PATH（便携模式），dev 下回退系统 PATH。
+///
+/// 便携模式还**显式优先内置 pnpm**（把 `runtime\pnpm` 的完整路径放到候选首位），
+/// 确保源码安装等场景用自带 pnpm 而非全局安装（目标用户可能未安装 node/pnpm）。
 pub fn spawn_any(
     programs: &[&str],
     args: &[String],
     cwd: Option<&PathBuf>,
     envs: &[(&str, String)],
 ) -> Result<std::process::Child, AppError> {
+    let mut candidates: Vec<String> = programs.iter().map(|s| s.to_string()).collect();
+    let is_pnpm = candidates.iter().any(|p| p == "pnpm.cmd" || p == "pnpm");
+    if is_pnpm {
+        if let Some(bundled) = crate::config::bundled_pnpm_path() {
+            if !candidates.contains(&bundled) {
+                candidates.insert(0, bundled);
+            }
+        }
+    }
     let mut last_err: Option<std::io::Error> = None;
-    for prog in programs {
+    for prog in &candidates {
         let mut cmd = Command::new(prog);
         no_window(&mut cmd);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // 便携模式：把内置运行时目录前置到 PATH，使 node/pnpm/npm/npx/dsh.cmd 可用。
+        cmd.env("PATH", crate::config::augmented_path());
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }

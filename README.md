@@ -3,87 +3,88 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Build & Test](https://github.com/CrandyChen/dsh-control-panel/actions/workflows/build.yml/badge.svg)](https://github.com/CrandyChen/dsh-control-panel/actions/workflows/build.yml)
 
-**DSH Control Panel** 是面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的 Windows 桌面图形化控制面板：安装、启动、停止、更新、修复、卸载 DeepSeek Harness 程序，并管理它的插件，无需手动操作命令行。
+**DSH Control Panel** 是面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的 Windows 桌面图形化控制面板：安装、启动、停止、更新、修复、卸载、运行 DeepSeek Harness 程序，并管理它的插件。也可将其当做DSH的桌面端使用。
 
 [English](README-EN.md)
 
 ## 这是什么？
 
-DSH Control Panel 将 DeepSeek Harness 常用的**安装**、**更新**、**卸载**、**启动**、**停止**、**修复**、**插件管理**等终端命令行操作封装成图形界面，便于新手操作。
+DSH Control Panel 把 DeepSeek Harness 常用的**安装**、**更新**、**卸载**、**启动**、**停止**、**修复**、**插件管理**等终端命令行操作封装成图形界面，便于新手操作。同时也内置了web访问能力，可将其当做 DSH 的桌面端使用。
 
-- **新手友好**：全图形化界面操作，友好的引导和提示。
-- **轻量**：基于Tauri 2，遵循DeepSeek Harness的官方的“**Run from source**”方式，不封装依赖，保持轻量，单文件，小巧便携。
-- **及时更新**：自动拉取DeepSeek Harness最新源码，构建最新版本应用。
-- **不侵入 DSH**：只封装DSH相关命令行操作，不修改其源码。
+- **便携自足**：基于 Tauri 2 开发，便携版，解压即用；已内置 Node.js 与 pnpm，无需用户单独安装运行环境。
+- **DSH 双安装模式**：默认下载**预构建内核**；也可从官方源码安装（此时需要本机安装 Git）。
+- **及时更新**：自动检测 DSH 最新版本，用户可选择自动升级到最新版本。
+- **不侵入 DSH**：只封装 DSH 相关命令行操作，不修改其源码。
 
-## 安装 DSH 所需的运行环境
-- 由于采用 Run from source 方式运行 DeepSeek Harness，因此需要安装相关依赖。
+## 系统要求
 
-| 工具 | 要求 | 说明 |
-| --- | --- | --- |
-| Windows | 10 / 11（64 位） | WebView2 Runtime（Win11 自带；Win10 缺失时到微软官网安装） |
-| Git | 任意较新版本 | 用于克隆 / 更新 DeepSeek Harness |
-| Node.js | ≥ 22.19 或 ≥ 24 | DeepSeek Harness 引擎要求（推荐 LTS） |
-| pnpm | ≥ 11.7 | 需先安装 Node.js |
-| Python | 推荐（可选） | 部分扩展功能会用到；不影响安装 / 启动 / 更新 |
+| 项 | 说明 |
+| --- | --- |
+| Windows | 10 / 11（64 位） |
+| WebView2 Runtime | Win11 自带；Win10 缺失时到微软官网安装 |
+| Git | **仅源码安装模式需要**；预构建内核模式不需要 |
 
-控制面板启动时会自动检测以上环境，缺失或版本过低时，程序内会有相关安装指引。
+Node.js 与 pnpm 已内置在控制面板中，无需单独安装。
+
+## DSH 下载源
+
+| 安装方式 | 下载源 |
+| --- | --- |
+| 预构建内核 | <https://github.com/dsh-tauri-desk/deepseek-harness-pkg/releases/latest>（ `deepseek-harness-pkg-windows.zip`）|
+| 官方源码 | <https://github.com/deepseek-ai/deepseek-harness.git>  |
+
+
+## 安装 DeepSeek Harness（两种模式）
+
+点击「安装」后选择安装方式：
+
+- **预构建内核（默认）**：从 GitHub（[deepseek-harness-pkg](https://github.com/dsh-tauri-desk/deepseek-harness-pkg)）下载最新 `deepseek-harness-pkg-windows.zip`，解压到程序运行目录下的 `dsh` 子目录。
+- **从源码安装**：选择父目录（默认程序运行目录），控制面板自动创建 `deepseek-harness` 子目录，依次执行 `git clone` → `pnpm install` → `pnpm run build`。此模式需本机已安装 Git。
 
 ## 功能总览
 
-### 1. DSH安装
-- **功能说明**：按照官方的“**Run from source**”方式安装DeepSeek Harness。
-- **用法**：点击「安装」，任意选择一个父目录——控制面板会自动创建  `deepseek-harness` 子目录。
-- **封装的命令**：`git clone https://github.com/deepseek-ai/deepseek-harness.git`  → `pnpm install` → `pnpm run build`。
+### 1. DSH 启动 / 停止
+- 启动 DeepSeek Harness web 服务，就绪后按「打开界面默认方式」设置自动打开（默认程序内标签页，可改为系统浏览器，见「设置」）；「停止」结束整个进程树。
+- 后台运行：DSH 作为独立进程持续运行，关闭本控制面板不影响 DSH。
 
-### 2. DSH 启动 / 停止
-- **功能说明**：启动或结束 DeepSeek Harness web 服务。
-- **用法**：点击「启动」，服务就绪后自动在程序内标签页打开  `http://127.0.0.1:3080`；「停止」结束整个进程树。
-- **封装的命令**：`pnpm dsh web`。
-- **后台运行**：DSH 启动后作为独立进程在后台持续运行。关闭本控制面板窗口不会影响 DSH，可随时重新打开控制面板进行停止、更新、修复等操作。
+### 2. DSH 更新
+- 按安装方式检测更新：预构建内核对比 GitHub 最新 release；源码模式对比官方仓库提交。
+- 后台定时自动检测，有新版本时更新按钮显示红色 **NEW** 提示；更新前会自动停止 web 服务。
 
-### 3. DSH 更新
-- **功能说明**：检测DSH官方源码是否有更新，有新版本时弹出对话框展示详情，由你选择「立即更新」或「忽略」。 后台定时自动检测，有新版本时更新按钮上显示红色 **NEW** 提示。
-- **用法**：点击「更新」→ 查看详情对话框 → 确认执行；更新前会自动停止 web 服务。
-- **封装的命令**：`git fetch` / `git rev-parse` / `git rev-list --count` /  `git log`（检测）→ `git pull --ff-only` → `pnpm install` → `pnpm run build`（执行）。
+### 3. DSH 修复安装
+- 修复无法正常启动的安装。自动清理异常状态并重建：源码模式走 git 重置 + 重新构建；预构建模式重新下载内核。
 
-### 4. DSH 修复安装
-- **功能说明**：修复无法正常启动的安装（常见原因是插件安装 / 更新被中断残留异常状态）。自动清理锁文件与残留进程、将安装目录重置为官方代码并重新构建，最坏情况删除并重新克隆安装目录。
-- **用法**：点击「修复安装」（DSH 启动失败时也会以友好对话框自动建议）。
-- **封装的命令**：`git fetch` → `git reset --hard origin/<分支>` →  `git clean -fdx` → `pnpm install` → `pnpm run build`（深度修复：删除 `node_modules`；  保底：整体重新克隆）。
+### 4. DSH 插件管理
+- 图形化安装 / 更新 / 卸载 DSH profile 插件（`dsh plugin`），插件按 profile 互相隔离。
+- 支持 npm 包名、`github:owner/repo[#版本]`、GitHub 仓库链接、GitHub 压缩包链接，甚至完整的 `dsh plugin` 命令。
+- 常见问题自动处理：pnpm 拦截插件构建脚本时自动加入 profile 的 allowBuilds 白名单并重试；web 服务运行中的插件操作会**自动停止服务**，操作完成后**自动重启服务**，全程无需手动干预。
 
-### 5. DSH 插件管理
-- **功能说明**：图形化安装 / 更新 / 卸载 DSH profile 插件（`dsh plugin`），插件按 profile 互相隔离。在安装输入框中直接粘贴插件标识或命令即可，支持：npm 包名（可带版本）、`github:owner/repo[#版本]`、GitHub 仓库链接、GitHub 压缩包链接（`.tar.gz`，部分插件官方文档的安装命令就是这种链接），甚至完整的 `dsh plugin` 命令（自动识别其中的 `--profile`）。安装过程中遇到常见问题会自动处理：pnpm 禁止插件执行构建脚本时，自动把被拦截的插件加入该 profile 的 allowBuilds 白名单并重试；本机没有全局 `dsh` 命令时，自动改用 `pnpm dsh` 执行，全程无需手动干预。
-- **用法**：打开「插件管理」，选择 profile（默认 web）后，在输入框粘贴安装内容并点击「安装」；web 服务运行中**只能安装新插件**（更新 / 卸载被禁用，需先停止服务），安装完成后会提示重启 DSH 使插件生效。
-- **封装的命令**：`dsh plugin --profile <名称> add|update|remove <标识...>`。
+### 5. DSH 卸载
+- 彻底移除 DeepSeek Harness，范围共两项：「安装目录」与「DSH 用户数据目录」（~/.dsh，个人数据：插件、配置、凭据、会话记录、Agent 预设等）。
 
-### 6. DSH 卸载
-- **功能说明**：彻底移除 DeepSeek Harness。卸载范围共两项：「安装目录」（DSH 程序本体，含代码与构建产物）与「DSH 用户数据目录」（~/.dsh，个人数据，包括插件、配置、凭据、会话记录、Agent 预设等）。
-- **用法**：点击「卸载」，勾选要删除的内容并确认。
-- **封装的命令**：无（直接删除所选目录，带安全护栏；不会删除 pnpm 全局缓存）。
-
-### 7. 其他工具
+### 6. 其他工具
 - **打开终端**：在安装目录打开 PowerShell。
-- **打开界面**：在系统浏览器或程序新Tab（可配置）打开 DSH Web 界面。
-- **运行环境检测**：检测 Git / Node.js / pnpm / Python，并可打开安装指引。
+- **打开界面**：在系统浏览器或程序内新标签页打开 DSH Web 界面（可配置）。
 - **日志**：exe 同目录按天轮转的日志文件（保留 5 份），面板内实时查看。
-- **设置**：定时检测新版本及间隔、主题、语言设置等。
+- **设置**：定时检测新版本及间隔、主题、语言等。
 
 ## 界面截图
 
 主界面
- ![主界面](assets/main.png) 
- 
-插件管理 
- ![插件管理](assets/plugin.png) 
+ ![主界面](assets/main.png)
+
+插件管理
+ ![插件管理](assets/plugin.png)
 
 ## 下载与安装
 
 - 到 [Releases](https://github.com/CrandyChen/dsh-control-panel/releases) 下载便携版 zip：
-  解压后双击 `DSH-Control-Panel.exe` 即可，无需安装。
+  解压后双击 `DSH-Control-Panel.exe` 即可，无需安装，内置运行环境。
 - 或从源码构建（见下）。
 
 ## 开发环境
+
+构建控制面板本身需要：
 
 - Node.js ≥ 22.19 或 ≥ 24、pnpm ≥ 11.7
 - Rust（rustup stable）+ VS Build Tools（勾选「使用 C++ 的桌面开发」）
@@ -93,9 +94,8 @@ DSH Control Panel 将 DeepSeek Harness 常用的**安装**、**更新**、**卸�
 pnpm install
 pnpm tauri dev          # 开发模式（热更新）
 pnpm tauri build        # 构建 exe
-pnpm portable           # 构建并打包便携 zip → dist-portable/
+pnpm portable           # 构建并打包内置运行环境的便携 zip → dist-portable/
 ```
-
 
 ## 目录结构
 
@@ -105,12 +105,11 @@ src/                     React 前端（antd 5、深浅主题、中英双语）
   usePanel.ts            核心状态钩子（配置/探测/阶段/日志/标签页/动作）
   components/            对话框与面板（安装/更新/修复/插件/卸载等）
 src-tauri/src/           Rust 后端（config/logging/process/detect/tools/net/version/
-                         install/update/repair/uninstall/web/plugin/terminal/i18n）
-scripts/                 便携打包（pnpm portable）
+                         install/update/repair/uninstall/web/plugin/prebuilt/terminal/i18n）
+scripts/                 便携打包（pnpm portable，内置 Node.js/pnpm 运行时）
 assets/                  README 引用的界面截图
 .github/workflows/       CI：build.yml（检查）+ release.yml（打 tag 自动发布 zip）
 ```
-
 
 ## 许可
 

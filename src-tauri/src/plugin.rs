@@ -184,6 +184,124 @@ pub fn read_plugin_list(dir: &Path, profile: &str, use_pnpm_dsh: bool) -> Plugin
     }
 }
 
+// ─────────────────────────────── profile bundle 校准 ───────────────────────────────
+
+/// bundle 包是否可解析：内核 `node_modules/<pkg>`，或沿 profile 目录上溯
+/// （profile 自身 node_modules / pnpm workspace 上溯到 profiles/node_modules、
+/// `$DSH_HOME/node_modules`）。与 dsh-app-boot 的 `resolveBundleDir` 一致。
+fn bundle_resolvable(install_dir: &Path, profile_dir: &Path, package: &str) -> bool {
+    if install_dir
+        .join("node_modules")
+        .join(package)
+        .join("package.json")
+        .is_file()
+    {
+        return true;
+    }
+    let mut dir = Some(profile_dir);
+    while let Some(d) = dir {
+        if d.join("node_modules").join(package).join("package.json").is_file() {
+            return true;
+        }
+        dir = d.parent();
+    }
+    false
+}
+
+/// 校准指定 home 下所有已初始化 profile 的 bundle 列表：移除当前内核（或 profile
+/// 自身依赖）无法解析的 bundle 条目，使 profile 与已安装内核对齐。
+///
+/// 背景：`~/.dsh` 可能由其它 DSH 桌面发行版写入（如带 `dsh-tauri` 自定义 bundle
+/// 的 profile），换成纯预构建内核后 `dsh web` 会因无法解析该 bundle 启动即失败
+/// （`dsh: cannot resolve profile bundle ...`）。此函数为预构建模式的
+/// 安装 / 更新 / 修复 / 启动前调用，保证启动可用；只移除无法解析的条目，
+/// 保留 profile 的其它配置与插件。
+///
+/// 返回被移除的 (profile 名, 被移除的 bundle 列表)；单个 profile 读取/写回失败
+/// 跳过（不阻断主流程）。
+pub fn reconcile_profile_bundles(
+    install_dir: &Path,
+    home: &Path,
+) -> Vec<(String, Vec<String>)> {
+    let profiles = home.join("profiles");
+    let mut removed_all: Vec<(String, Vec<String>)> = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&profiles) else {
+        return removed_all;
+    };
+    for e in rd.flatten() {
+        let pdir = e.path();
+        if !pdir.is_dir() {
+            continue;
+        }
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
+        if name.is_empty() || name.starts_with('.') {
+            continue;
+        }
+        let manifest_path = pdir.join("package.json");
+        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let (before, kept) = {
+            let Some(bundles) = v
+                .pointer("/dsh/profile/bundles")
+                .and_then(|b| b.as_array())
+            else {
+                continue;
+            };
+            let before: Vec<String> = bundles
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+            if before.is_empty() {
+                continue;
+            }
+            let kept: Vec<serde_json::Value> = bundles
+                .iter()
+                .filter(|x| {
+                    x.as_str()
+                        .map(|pkg| bundle_resolvable(install_dir, &pdir, pkg))
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect();
+            (before, kept)
+        };
+        if kept.len() == before.len() {
+            continue; // 全部可解析，无需改动
+        }
+        let removed: Vec<String> = before
+            .iter()
+            .filter(|pkg| !kept.iter().any(|k| k.as_str() == Some(pkg.as_str())))
+            .cloned()
+            .collect();
+        if let Some(arr) = v
+            .pointer_mut("/dsh/profile/bundles")
+            .and_then(|b| b.as_array_mut())
+        {
+            *arr = kept;
+        }
+        // 与 dsh-app-boot 的写回格式一致（2 空格缩进 + 末尾换行）。
+        let Ok(json) = serde_json::to_string_pretty(&v) else {
+            continue;
+        };
+        if std::fs::write(&manifest_path, format!("{json}\n")).is_err() {
+            continue;
+        }
+        removed_all.push((name, removed));
+    }
+    removed_all
+}
+
+/// 使用默认 `$DSH_HOME` 校准全部 profile 的 bundle 列表。
+pub fn reconcile_all_profiles(install_dir: &Path) -> Vec<(String, Vec<String>)> {
+    reconcile_profile_bundles(install_dir, Path::new(&crate::detect::dsh_home()))
+}
+
 // ─────────────────────────────── 智能输入解析 ───────────────────────────────
 
 /// 剥离输入开头的 PowerShell 环境变量赋值（如 `$env:PNPM_ALLOW_BUILDS="*";`）。
@@ -795,19 +913,46 @@ pub(crate) fn run_capture(
     })
 }
 
-/// web 服务运行中禁止更新/卸载插件（仅安装不受限）。
-/// 返回 Err 时调用方应中止操作并展示该提示。
-pub fn ensure_mutation_allowed() -> Result<(), String> {
-    if crate::web::port_in_use(crate::config::WEB_PORT) {
-        return Err(crate::i18n::t("plugin.running"));
+/// 构建某安装方式的 `dsh plugin` 命令（返回 (程序名列表, argv 前缀)）。
+/// - prebuilt：安装目录下的 `node_modules\.bin\dsh.cmd`；
+/// - source + usePnpmDsh：`pnpm dsh plugin …`；
+/// - source + 非 usePnpmDsh：`dsh plugin …`。
+fn dsh_plugin_invocation(
+    install_dir: &Path,
+    profile: &str,
+    args: &[String],
+    use_pnpm: bool,
+    mode: &str,
+) -> (Vec<String>, Vec<String>) {
+    if mode == "prebuilt" {
+        let dsh = install_dir.join("node_modules").join(".bin").join("dsh.cmd");
+        let mut argv = vec!["plugin".into(), "--profile".into(), profile.to_string()];
+        argv.extend(args.iter().cloned());
+        (vec![dsh.to_string_lossy().to_string()], argv)
+    } else if use_pnpm {
+        let mut argv = vec![
+            "dsh".into(),
+            "plugin".into(),
+            "--profile".into(),
+            profile.to_string(),
+        ];
+        argv.extend(args.iter().cloned());
+        (vec!["pnpm.cmd".into(), "pnpm".into()], argv)
+    } else {
+        let mut argv = vec![
+            "plugin".into(),
+            "--profile".into(),
+            profile.to_string(),
+        ];
+        argv.extend(args.iter().cloned());
+        (vec!["dsh.cmd".into(), "dsh".into()], argv)
     }
-    Ok(())
 }
 
-/// 执行一次 `dsh plugin --profile <profile> <args>` 操作。
+/// 执行一次 `dsh plugin --profile <profile> <args>` 操作（按安装方式分派命令）。
 ///
 /// 失败自动重试（最多各一次）：
-/// - 全局 `dsh` 不可识别 → 切换为 `pnpm dsh`（写回配置）；
+/// - 全局 `dsh` 不可识别 → 切换为 `pnpm dsh`（写回配置；仅源码模式）；
 /// - pnpm 拦截构建脚本 → 为 profile 配置 allowBuilds 并重试。
 pub fn run_plugin_op(
     app: &AppHandle,
@@ -820,17 +965,26 @@ pub fn run_plugin_op(
 ) -> Result<PluginOpResult, String> {
     let action_label = crate::i18n::t(action_key);
     let cfg: AppConfig = config::load_config(app);
+    let mode = cfg.install_mode.clone();
     let install_dir = cfg
         .install_dir
         .clone()
         .ok_or_else(|| AppError::NotInstalled.friendly())?;
     let cwd = PathBuf::from(&install_dir);
-    if !crate::detect::is_valid_repo(&cwd) {
+    if mode == "source" {
+        if !crate::detect::is_valid_repo(&cwd) {
+            return Err(AppError::NotInstalled.friendly());
+        }
+    } else if !crate::detect::is_valid_prebuilt(&cwd) {
         return Err(AppError::NotInstalled.friendly());
     }
     let pdir = profile_dir(profile)?;
 
-    let display = format!("dsh plugin --profile {profile} {}", args.join(" "));
+    let display = if mode == "prebuilt" {
+        format!("node_modules\\.bin\\dsh.cmd plugin --profile {profile} {}", args.join(" "))
+    } else {
+        format!("dsh plugin --profile {profile} {}", args.join(" "))
+    };
     logger.info(&crate::i18n::t_fmt(
         "log.plugin_op_start",
         &[&action_label, &display, &install_dir],
@@ -848,28 +1002,11 @@ pub fn run_plugin_op(
             title: title.clone(),
         });
 
-        let programs: &[&str] = if use_pnpm {
-            &["pnpm.cmd", "pnpm"]
-        } else {
-            &["dsh.cmd", "dsh"]
-        };
-        let mut argv: Vec<String> = if use_pnpm {
-            vec![
-                "dsh".into(),
-                "plugin".into(),
-                "--profile".into(),
-                profile.to_string(),
-            ]
-        } else {
-            vec![
-                "plugin".into(),
-                "--profile".into(),
-                profile.to_string(),
-            ]
-        };
-        argv.extend(args.iter().cloned());
+        let (programs_vec, argv) =
+            dsh_plugin_invocation(&cwd, profile, args, use_pnpm, &mode);
+        let program_refs: Vec<&str> = programs_vec.iter().map(|s| s.as_str()).collect();
 
-        let outcome = match run_capture(&programs, &argv, &cwd, &[], &step_id, channel) {
+        let outcome = match run_capture(&program_refs, &argv, &cwd, &[], &step_id, channel) {
             Ok(o) => o,
             Err(e) => {
                 let _ = channel.send(PipelineEvent::Error { message: e.clone() });
@@ -893,8 +1030,8 @@ pub fn run_plugin_op(
             });
         }
 
-        // 失败 1：全局 dsh 不可识别 → 切换 pnpm dsh。
-        if !use_pnpm && is_dsh_missing(&outcome.output) {
+        // 失败 1：全局 dsh 不可识别 → 切换 pnpm dsh（仅源码模式；预构建模式用本地 dsh.cmd）。
+        if !use_pnpm && mode != "prebuilt" && is_dsh_missing(&outcome.output) {
             use_pnpm = true;
             let mut cfg2 = config::load_config(app);
             cfg2.use_pnpm_dsh = true;
@@ -1013,6 +1150,7 @@ fn run_query(programs: &[&str], args: &[String], cwd: &Path, timeout: Duration) 
         let mut cmd = Command::new(prog);
         no_window(&mut cmd);
         cmd.args(args).current_dir(cwd);
+        cmd.env("PATH", crate::config::augmented_path());
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         match cmd.spawn() {
             Ok(mut child) => {
@@ -1771,5 +1909,102 @@ mod tests {
         );
         assert_eq!(strip_env_prefix("github:a/b"), "github:a/b");
         assert_eq!(strip_env_prefix("  dsh plugin add x"), "dsh plugin add x");
+    }
+
+    // ---------- reconcile_profile_bundles ----------
+
+    #[test]
+    fn reconcile_prunes_only_unresolvable_bundles() {
+        let base = tmp_dir("recon1");
+        let install = base.join("kernel");
+        let home = base.join("home");
+        // 内核 node_modules：只提供 dsh-base（模拟预构建内核）。
+        std::fs::create_dir_all(install.join("node_modules/@deepseek-ai/dsh-base")).unwrap();
+        std::fs::write(
+            install.join("node_modules/@deepseek-ai/dsh-base/package.json"),
+            r#"{"name":"@deepseek-ai/dsh-base","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        // profile web：bundles 含可解析的 dsh-base 与不可解析的 dsh-tauri（其它发行版残留）。
+        let pdir = home.join("profiles/web");
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join("package.json"),
+            r#"{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": { "some-plugin": "1.0.0" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "dsh-tauri"] } }
+}"#,
+        )
+        .unwrap();
+
+        let removed = reconcile_profile_bundles(&install, &home);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "web");
+        assert_eq!(removed[0].1, vec!["dsh-tauri"]);
+
+        // 写回后：bundle 只保留可解析项，其它字段（依赖等）原样保留。
+        let text = std::fs::read_to_string(pdir.join("package.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let bundles: Vec<&str> = v
+            .pointer("/dsh/profile/bundles")
+            .and_then(|b| b.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap();
+        assert_eq!(bundles, vec!["@deepseek-ai/dsh-base"]);
+        assert_eq!(
+            v.pointer("/dependencies/some-plugin").and_then(|x| x.as_str()),
+            Some("1.0.0")
+        );
+
+        // 幂等：再次执行无改动。
+        assert!(reconcile_profile_bundles(&install, &home).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn reconcile_keeps_bundle_resolvable_via_profiles_node_modules() {
+        // 模拟 pnpm workspace hoist：bundle 装在 profiles/node_modules（上溯查找命中）。
+        let base = tmp_dir("recon2");
+        let install = base.join("kernel");
+        let home = base.join("home");
+        std::fs::create_dir_all(install.join("node_modules")).unwrap();
+        std::fs::create_dir_all(home.join("profiles/node_modules/@deepseek-ai/dsh-web-app")).unwrap();
+        std::fs::write(
+            home.join("profiles/node_modules/@deepseek-ai/dsh-web-app/package.json"),
+            r#"{"name":"@deepseek-ai/dsh-web-app","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let pdir = home.join("profiles/web");
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join("package.json"),
+            r#"{"name":"dsh-profile-web","private":true,"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-web-app"]}}}"#,
+        )
+        .unwrap();
+
+        // hoist 到 profiles/node_modules 的 bundle 应视为可解析，不产生移除。
+        assert!(reconcile_profile_bundles(&install, &home).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn reconcile_skips_missing_home_and_unparseable_profile() {
+        let base = tmp_dir("recon3");
+        let install = base.join("kernel");
+        let home = base.join("home");
+        std::fs::create_dir_all(&install).unwrap();
+        // home 不存在 → no-op。
+        assert!(reconcile_profile_bundles(&install, &home).is_empty());
+        // profile 的 package.json 无法解析 → 跳过（不 panic、不写回）。
+        let pdir = home.join("profiles/web");
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(pdir.join("package.json"), "not json").unwrap();
+        assert!(reconcile_profile_bundles(&install, &home).is_empty());
+        // 无 bundles 字段的 profile → 跳过。
+        std::fs::write(pdir.join("package.json"), r#"{"name":"x"}"#).unwrap();
+        assert!(reconcile_profile_bundles(&install, &home).is_empty());
+        std::fs::remove_dir_all(&base).ok();
     }
 }

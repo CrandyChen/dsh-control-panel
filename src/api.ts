@@ -30,12 +30,13 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (cfg: AppConfig) => invoke<void>("save_config", { cfg }),
   pickDirectory: () => invoke<string | null>("pick_directory"),
+  getDefaultParentDir: () => invoke<string>("default_parent_dir"),
   detectState: () => invoke<DetectResult>("detect_state"),
   detectTools: () => invoke<ToolStatus[]>("detect_tools"),
   scanManualInstalls: () => invoke<string[]>("scan_manual_installs"),
   adoptInstall: (path: string) => invoke<void>("adopt_install", { path }),
-  install: (dir: string, onEvent: (e: PipelineEvent) => void) =>
-    runPipeline("install", { dir }, onEvent),
+  install: (dir: string, mode: string, onEvent: (e: PipelineEvent) => void) =>
+    runPipeline("install", { dir, mode }, onEvent),
   checkForUpdates: () => invoke<UpdateCheckResult>("check_for_updates"),
   update: (onEvent: (e: PipelineEvent) => void) => runPipeline("update", {}, onEvent),
   repairInstall: (onEvent: (e: PipelineEvent) => void) =>

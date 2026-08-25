@@ -55,6 +55,32 @@ pub fn is_valid_repo(dir: &Path) -> bool {
     }
 }
 
+/// 是否为有效的预构建内核安装目录（含 `node_modules\.bin\dsh.cmd`）。
+pub fn is_valid_prebuilt(dir: &Path) -> bool {
+    dir.join("node_modules").join(".bin").join("dsh.cmd").is_file()
+}
+
+/// 读取安装根的版本：预构建内核优先读 CLI 包版本（`node_modules/@deepseek-ai/dsh`，
+/// 与 release tag 一致），其次根 `package.json`（打包外壳版本，可能与 release 脱节），
+/// 最后 `apps/cli/package.json`。源码模式使用 `read_version`（apps/cli）。
+pub fn read_pkg_version(dir: &Path) -> Option<String> {
+    for rel in [
+        "node_modules/@deepseek-ai/dsh/package.json",
+        "package.json",
+        "apps/cli/package.json",
+    ] {
+        let Ok(s) = std::fs::read_to_string(dir.join(rel)) else {
+            continue;
+        };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            if let Some(x) = v.get("version").and_then(|x| x.as_str()) {
+                return Some(x.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// 读 apps/cli/package.json 的 version 字段。
 pub fn read_version(dir: &Path) -> Option<String> {
     let s = std::fs::read_to_string(dir.join("apps/cli/package.json")).ok()?;
@@ -72,19 +98,38 @@ pub fn is_running() -> bool {
     crate::web::port_in_use(WEB_PORT)
 }
 
-pub fn detect_state(dir: Option<&str>) -> DetectResult {
+pub fn detect_state(dir: Option<&str>, mode: &str) -> DetectResult {
     let path = dir.map(Path::new);
-    let valid = path.map(is_valid_repo).unwrap_or(false);
+    let valid = if mode == "source" {
+        path.map(is_valid_repo).unwrap_or(false)
+    } else {
+        path.map(is_valid_prebuilt).unwrap_or(false)
+    };
+    let built = if mode == "source" {
+        valid && path.map(is_built).unwrap_or(false)
+    } else {
+        // 预构建内核已构建完成，无需重新构建。
+        valid
+    };
+    let version = if valid {
+        if mode == "source" {
+            path.and_then(read_version)
+        } else {
+            path.and_then(read_pkg_version)
+        }
+    } else {
+        None
+    };
     DetectResult {
         installed: valid,
         valid,
-        built: valid && path.map(is_built).unwrap_or(false),
-        version: if valid { path.and_then(read_version) } else { None },
+        built,
+        version,
         running: is_running(),
         install_dir: dir.map(|s| s.to_string()),
         dsh_home: dsh_home(),
-        // 实时读取 HEAD commit（config 中的 installed_commit 可能因手动 git pull 而陈旧）。
-        installed_commit: if valid {
+        // 预构建内核无 git commit；源码模式实时读取 HEAD。
+        installed_commit: if mode == "source" && valid {
             path.and_then(crate::version::read_commit)
         } else {
             None
@@ -226,6 +271,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_version(&tmp).as_deref(), Some("0.1.0-rc.5"));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn pkg_version_prefers_cli_package_over_wrapper_root() {
+        // 预构建内核：根 package.json 是打包外壳版本（0.1.1-rc.1），
+        // CLI 包版本（0.1.1-rc.2）才是与 release tag 一致的版本。
+        let tmp = std::env::temp_dir().join(format!("dsh-pkgver-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("node_modules/@deepseek-ai/dsh")).unwrap();
+        std::fs::write(
+            tmp.join("node_modules/@deepseek-ai/dsh/package.json"),
+            r#"{"name":"@deepseek-ai/dsh","version":"0.1.1-rc.2"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("package.json"),
+            r#"{"name":"deepseek-harness-pkg","version":"0.1.1-rc.1"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_pkg_version(&tmp).as_deref(), Some("0.1.1-rc.2"));
+        // 无 CLI 包时回退根 package.json。
+        std::fs::remove_dir_all(tmp.join("node_modules")).unwrap();
+        assert_eq!(read_pkg_version(&tmp).as_deref(), Some("0.1.1-rc.1"));
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

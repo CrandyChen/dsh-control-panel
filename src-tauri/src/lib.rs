@@ -14,6 +14,7 @@ mod install;
 mod logging;
 mod net;
 mod plugin;
+mod prebuilt;
 mod process;
 mod repair;
 mod terminal;
@@ -80,12 +81,18 @@ fn pick_directory(app: AppHandle) -> Option<String> {
     picked
 }
 
+/// 源码安装模式的默认父目录（程序运行目录），供前端安装弹窗预填。
+#[tauri::command]
+fn default_parent_dir() -> String {
+    config::mode1_default_parent().to_string_lossy().to_string()
+}
+
 #[tauri::command]
 async fn detect_state(app: AppHandle) -> DetectResult {
     tauri::async_runtime::spawn_blocking(move || {
         let logger = app.state::<AppState>().logger.clone();
         let cfg = config::load_config(&app);
-        let result = detect::detect_state(cfg.install_dir.as_deref());
+        let result = detect::detect_state(cfg.install_dir.as_deref(), &cfg.install_mode);
         // 版本与 commit 均由 detect_state 实时读取（config 中可能因手动 git pull 而陈旧）。
         let commit = result
             .installed_commit
@@ -116,11 +123,12 @@ async fn detect_state(app: AppHandle) -> DetectResult {
     })
 }
 
-/// 检测运行环境工具（git / node / pnpm 必装 + python 推荐），启动时自动调用。
+/// 检测运行环境工具（仅源码模式检测 Git；预构建模式返回空），启动时自动调用。
 #[tauri::command]
 fn detect_tools(app: AppHandle) -> Vec<tools::ToolStatus> {
     let logger = app.state::<AppState>().logger.clone();
-    let result = tools::detect_tools();
+    let cfg = config::load_config(&app);
+    let result = tools::detect_tools(&cfg.install_mode);
     let summary = result
         .iter()
         .map(|t| {
@@ -167,6 +175,7 @@ async fn adopt_install(app: AppHandle, path: String) -> Result<(), String> {
         let commit = version::read_commit(&p);
         let mut cfg = config::load_config(&app);
         cfg.install_dir = Some(path.clone());
+        cfg.install_mode = "source".to_string();
         cfg.installed_version = version;
         cfg.installed_commit = commit;
         cfg.last_check_at = Some(config::now_string());
@@ -189,12 +198,15 @@ async fn adopt_install(app: AppHandle, path: String) -> Result<(), String> {
 async fn install(
     app: AppHandle,
     dir: String,
+    mode: String,
     channel: Channel<PipelineEvent>,
 ) -> Result<(), String> {
     let logger = app.state::<AppState>().logger.clone();
-    tauri::async_runtime::spawn_blocking(move || install::install(&app, &dir, &channel, &logger))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        install::install(&app, &dir, &mode, &channel, &logger)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -202,15 +214,27 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> 
     tauri::async_runtime::spawn_blocking(move || {
         let logger = app.state::<AppState>().logger.clone();
         let cfg = config::load_config(&app);
+        let mode = cfg.install_mode.clone();
         let dir = cfg
             .install_dir
             .clone()
             .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
         let path = PathBuf::from(&dir);
-        if !detect::is_valid_repo(&path) {
+        if mode == "source" && !detect::is_valid_repo(&path) {
             return Err(error::AppError::NotInstalled.friendly());
         }
-        let result = version::check_for_updates_in_dir(&path).map_err(|e| e.friendly())?;
+        if mode != "source" && !detect::is_valid_prebuilt(&path) {
+            return Err(error::AppError::NotInstalled.friendly());
+        }
+        // 预构建模式以磁盘实时版本为准：配置中可能残留旧值（如打包外壳版本
+        // 0.1.1-rc.1），与 release tag 不一致会造成「永远有新版本」。
+        let current_version = if mode == "source" {
+            cfg.installed_version.clone()
+        } else {
+            detect::read_pkg_version(&path).or_else(|| cfg.installed_version.clone())
+        };
+        let result = version::check_for_updates_in_dir(&path, &mode, current_version.as_deref())
+            .map_err(|e| e.friendly())?;
         logger.info(&crate::i18n::t_fmt(
             "log.update_check",
             &[
@@ -422,8 +446,6 @@ async fn plugin_update(
 ) -> Result<plugin::PluginOpResult, String> {
     let logger = app.state::<AppState>().logger.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // 运行中禁止更新插件：文件可能被占用，且新版本插件需重启后才生效。
-        plugin::ensure_mutation_allowed()?;
         if spec.trim().is_empty() {
             return Err(i18n::t("plugin.missing.update.spec"));
         }
@@ -451,8 +473,6 @@ async fn plugin_remove(
 ) -> Result<plugin::PluginOpResult, String> {
     let logger = app.state::<AppState>().logger.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // 运行中禁止卸载插件：文件可能被占用，且会破坏运行中的 profile 依赖树。
-        plugin::ensure_mutation_allowed()?;
         let cleaned: Vec<String> = specs
             .into_iter()
             .map(|s| s.trim().to_string())
@@ -498,6 +518,7 @@ pub fn run() {
             get_config,
             save_config,
             pick_directory,
+            default_parent_dir,
             detect_state,
             detect_tools,
             scan_manual_installs,
@@ -581,8 +602,25 @@ fn spawn_auto_check(handle: AppHandle) {
             let cfg = config::load_config(&handle);
             if cfg.auto_check_enabled {
                 if let Some(dir) = cfg.install_dir.clone() {
-                    if detect::is_valid_repo(std::path::Path::new(&dir)) {
-                        match version::check_for_updates_in_dir(std::path::Path::new(&dir)) {
+                    let mode = cfg.install_mode.clone();
+                    let installed = if mode == "source" {
+                        detect::is_valid_repo(std::path::Path::new(&dir))
+                    } else {
+                        detect::is_valid_prebuilt(std::path::Path::new(&dir))
+                    };
+                    if installed {
+                        // 预构建模式以磁盘实时版本为准（配置可能残留旧值造成误报更新）。
+                        let current_version = if mode == "source" {
+                            cfg.installed_version.clone()
+                        } else {
+                            detect::read_pkg_version(std::path::Path::new(&dir))
+                                .or_else(|| cfg.installed_version.clone())
+                        };
+                        match version::check_for_updates_in_dir(
+                            std::path::Path::new(&dir),
+                            &mode,
+                            current_version.as_deref(),
+                        ) {
                             Ok(result) => {
                                 let mut cfg2 = config::load_config(&handle);
                                 cfg2.update_available = result.update_available;

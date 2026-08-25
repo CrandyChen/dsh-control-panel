@@ -33,7 +33,7 @@ function titleFromUrl(url: string, fallback: string): string {
 export interface Panel {
   config: AppConfig | null;
   detect: DetectResult | null;
-  /** 运行环境工具检测结果（git/node/pnpm 必装 + python 推荐）。 */
+  /** 运行环境工具检测结果（仅源码模式 Git；预构建模式为空数组）。 */
   tools: ToolStatus[] | null;
   phase: Phase;
   logs: LogLine[];
@@ -41,15 +41,17 @@ export interface Panel {
   lastCheck: UpdateCheckResult | null;
   preview: UninstallPreview | null;
   currentStep: string | null;
+  /** 预构建内核下载/解压进度（step="download"|"extract"；received/total 字节、speedBps 字节/秒）；非空表示进行中。 */
+  progress: { step: string; received: number; total: number; speedBps: number } | null;
   /** 内嵌浏览器 Tab（纯前端状态）；activeTabId 为 null 时显示控制面板主界面。 */
   tabs: BrowserTab[];
   activeTabId: string | null;
   manualCandidates: string[] | null;
   logDir: string;
   refresh: () => Promise<void>;
-  /** 重新检测运行环境工具（git/node/pnpm/python）并更新 tools 状态，返回新结果。 */
+  /** 重新检测运行环境工具（仅源码模式 Git；预构建模式返回空）并更新 tools 状态。 */
   refreshTools: () => Promise<ToolStatus[]>;
-  install: (dir: string) => Promise<void>;
+  install: (dir: string, mode: string) => Promise<void>;
   /** 检测新版本：返回结果（失败为 null），由调用方决定是否展示更新详情对话框。 */
   checkForUpdates: () => Promise<UpdateCheckResult | null>;
   update: () => Promise<void>;
@@ -97,6 +99,13 @@ export function usePanel(): Panel {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewProgress, setPreviewProgress] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
+  /** 预构建内核下载/解压进度（step="download"|"extract"；非空表示进行中）。 */
+  const [progress, setProgress] = useState<{
+    step: string;
+    received: number;
+    total: number;
+    speedBps: number;
+  } | null>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [manualCandidates, setManualCandidates] = useState<string[] | null>(null);
@@ -111,6 +120,9 @@ export function usePanel(): Panel {
   const repairSuggested = useRef(false);
   /** 用户是否请求取消本次卸载预览扫描（取消后扫描返回的错误静默处理）。 */
   const previewCancelled = useRef(false);
+  /** 最新配置快照（供事件回调读取 openUiMode 等设置，避免订阅反复重建）。 */
+  const configRef = useRef(config);
+  configRef.current = config;
 
   const appendLog = useCallback((level: string, text: string) => {
     setLogs((prev) => {
@@ -152,10 +164,15 @@ export function usePanel(): Panel {
         // 运行状态由事件直接驱动（webStatus 已更新，无需再全量刷新）。
         setWebStatus(s);
         if (s === "ready") {
-          // 仅当由本程序启动成功时自动打开 DSH Tab。
+          // 仅当由本程序启动成功时自动打开界面：按「打开界面默认方式」设置分发
+          // （browser = 系统浏览器；tab（默认）= 程序内新标签页）。
           if (startedByUs.current) {
             startedByUs.current = false;
-            void openDshTabRef.current();
+            if (configRef.current?.openUiMode === "browser") {
+              void openWebUiRef.current();
+            } else {
+              void openDshTabRef.current();
+            }
           }
         }
         // 启动尝试后服务异常退出（error / 非用户主动停止的 stopped）→ 友好建议修复安装。
@@ -240,6 +257,7 @@ export function usePanel(): Panel {
       } finally {
         setPhase("idle");
         setCurrentStep(null);
+        setProgress(null);
         void refresh();
       }
     },
@@ -257,6 +275,7 @@ export function usePanel(): Panel {
         case "stepStarted": {
           const title = stepTitle(e.id, e.title);
           setCurrentStep(title);
+          setProgress(null);
           appendLog("INFO", `▶ ${title}`);
           break;
         }
@@ -265,13 +284,19 @@ export function usePanel(): Panel {
           break;
         case "stepFinished": {
           const title = stepTitle(e.id, e.id);
+          setProgress(null);
           appendLog("INFO", `✓ ${title} (exit ${e.exitCode})`);
           break;
         }
+        case "downloadProgress":
+          setProgress({ step: e.step, received: e.received, total: e.total, speedBps: e.speedBps });
+          break;
         case "error":
+          setProgress(null);
           appendLog("ERROR", e.message);
           break;
         case "finished":
+          setProgress(null);
           break;
       }
     },
@@ -285,8 +310,8 @@ export function usePanel(): Panel {
   }, []);
 
   const install = useCallback(
-    (dir: string) =>
-      withPhase("installing", () => api.install(dir, onPipelineEvent), t("msg.installDone")),
+    (dir: string, mode: string) =>
+      withPhase("installing", () => api.install(dir, mode, onPipelineEvent), t("msg.installDone")),
     [onPipelineEvent, withPhase, t],
   );
 
@@ -409,6 +434,9 @@ export function usePanel(): Panel {
     }
   }, [message, t]);
 
+  const openWebUiRef = useRef(openWebUi);
+  openWebUiRef.current = openWebUi;
+
   /** 打开 DeepSeek Harness 界面：已有 DSH Tab 则激活，否则新建。 */
   const openDshTab = useCallback(() => {
     const existing = tabs.find((t) => t.url === WEB_URL);
@@ -528,6 +556,7 @@ export function usePanel(): Panel {
     lastCheck,
     preview,
     currentStep,
+    progress,
     tabs,
     activeTabId,
     manualCandidates,

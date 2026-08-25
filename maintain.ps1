@@ -294,8 +294,11 @@ function Invoke-Pnpm {
     param([string[]]$Arguments, [string]$WorkingDirectory = $script:RepoRoot)
     # pnpm 是 .cmd，需经 cmd.exe 执行
     $cmdline = 'pnpm ' + (($Arguments | ForEach-Object { Quote-Arg $_ }) -join ' ')
+    # 无控制台（maintain.ps1 由 maintain.bat 以 Hidden 拉起）下 pnpm 无法交互，
+    # CI=true 与 confirmModulesPurge=false 使其自动清空/重装 node_modules 而不弹确认。
     return Invoke-Process -FileName "$env:SystemRoot\System32\cmd.exe" `
-        -Arguments @('/d', '/s', '/c', $cmdline) -WorkingDirectory $WorkingDirectory
+        -Arguments @('/d', '/s', '/c', $cmdline) -WorkingDirectory $WorkingDirectory `
+        -Environment @{ 'CI' = 'true'; 'npm_config_confirm_modules_purge' = 'false' }
 }
 
 # ============================================================

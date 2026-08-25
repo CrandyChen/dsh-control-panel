@@ -1,8 +1,8 @@
 // 安装指引 HTML 生成器（中 / 英双语）。
 //
 // 生成自包含的 HTML 文档（内联 CSS/JS），以 blob URL 形式在新 tab 打开：
-// - 必装项（git/node/pnpm）缺失或版本过低 → 醒目红色卡片，给出官网下载链接与命令行安装方式；
-// - 推荐项（python）缺失 → 浅色可选卡片，不阻塞安装；
+// - 仅用于源码安装模式：必装项 Git 缺失或版本过低 → 醒目红色卡片，给出官网下载链接与命令行安装方式；
+// - 预构建内核模式无需任何外部环境，不触发本指引；
 // - 外链带 data-external 属性，内联脚本拦截点击并向父窗口 postMessage，
 //   由控制面板调用 opener 插件在系统浏览器打开。
 
@@ -38,8 +38,8 @@ interface GuideStrings {
 
 const zh: GuideStrings = {
   htmlLang: "zh-CN",
-  title: "运行环境安装指引",
-  sub: "DSH Control Panel 检测到以下运行环境状态。安装 DeepSeek Harness 需要 Git、Node.js、pnpm；Python 为可选项（推荐安装）。",
+  title: "运行环境安装指引（Git）",
+  sub: "DSH Control Panel 检测到以下运行环境状态。源码安装 DeepSeek Harness 需要 Git；Node.js 与 pnpm 已内置在控制面板中，无需单独安装。",
   footer:
     "提示：安装完成后，请重新打开控制面板（或点击主界面的「刷新」）重新检测。若仍有问题，可查看「运行日志」了解详细报错。",
   okBadge: (v) => `✓ 已安装（${v}）`,
@@ -48,7 +48,7 @@ const zh: GuideStrings = {
   missingOptionalBadge: "○ 未安装（可选）",
   requiredBadge: "必装",
   optionalBadge: "推荐（可选）",
-  introRequired: "以下任一方式完成后，重新打开控制面板（或点击「刷新」）即可继续安装。",
+  introRequired: "完成安装后，重新打开控制面板（或点击「刷新」）即可继续安装。",
   introOptional: "此项为可选项：缺失不阻塞安装，建议按需安装。",
   siteLink: (label) => `前往 ${label} 下载安装包`,
   copy: "复制",
@@ -62,46 +62,15 @@ const zh: GuideStrings = {
         { label: "winget 安装（推荐）", cmd: "winget install --id Git.Git -e --source winget" },
         { label: "验证安装", cmd: "git --version" },
       ],
-      note: "DeepSeek Harness 安装与更新依赖 Git 拉取代码。",
-    },
-    node: {
-      name: "Node.js",
-      site: "https://nodejs.org/zh-cn/download",
-      siteLabel: "Node.js 官网下载",
-      commands: [
-        { label: "winget 安装 LTS（推荐）", cmd: "winget install --id OpenJS.NodeJS.LTS -e --source winget" },
-        { label: "验证安装", cmd: "node -v" },
-      ],
-      note: "DeepSeek Harness 需要 Node.js ≥ 22.19 或 ≥ 24（推荐安装 LTS 版本）。",
-    },
-    pnpm: {
-      name: "pnpm",
-      site: "https://pnpm.io/zh/installation",
-      siteLabel: "pnpm 官网安装文档",
-      commands: [
-        { label: "通过 npm 全局安装（推荐）", cmd: "npm install -g pnpm" },
-        { label: "通过 winget 安装", cmd: "winget install --id pnpm.pnpm -e --source winget" },
-        { label: "验证安装", cmd: "pnpm --version" },
-      ],
-      note: "DeepSeek Harness 需要 pnpm ≥ 11.7；需先安装 Node.js。",
-    },
-    python: {
-      name: "Python",
-      site: "https://www.python.org/downloads/",
-      siteLabel: "Python 官网下载",
-      commands: [
-        { label: "winget 安装（推荐）", cmd: "winget install --id Python.Python.3.12 -e --source winget" },
-        { label: "验证安装", cmd: "python --version" },
-      ],
-      note: "推荐安装（可选）：部分扩展功能会用到 Python，缺失不影响 DeepSeek Harness 的安装、启动与更新。",
+      note: "源码安装与更新 DeepSeek Harness 依赖 Git 拉取代码。",
     },
   },
 };
 
 const en: GuideStrings = {
   htmlLang: "en",
-  title: "Runtime Environment Setup Guide",
-  sub: "DSH Control Panel detected the following runtime state. Installing DeepSeek Harness requires Git, Node.js and pnpm; Python is optional (recommended).",
+  title: "Runtime Setup Guide (Git)",
+  sub: "DSH Control Panel detected the following runtime state. Installing DeepSeek Harness from source requires Git; Node.js and pnpm are bundled with the control panel, so no separate install is needed.",
   footer:
     "Tip: after finishing, reopen the control panel (or click \"Refresh\" on the home view) to re-check. If issues persist, see the \"Log\" for details.",
   okBadge: (v) => `✓ Installed (${v})`,
@@ -110,7 +79,7 @@ const en: GuideStrings = {
   missingOptionalBadge: "○ Not installed (optional)",
   requiredBadge: "Required",
   optionalBadge: "Recommended (optional)",
-  introRequired: "After completing any option below, reopen the control panel (or click \"Refresh\") to continue installing.",
+  introRequired: "After completing the install, reopen the control panel (or click \"Refresh\") to continue.",
   introOptional: "This item is optional: installing it is not required to proceed.",
   siteLink: (label) => `Visit ${label} to download the installer`,
   copy: "Copy",
@@ -124,38 +93,7 @@ const en: GuideStrings = {
         { label: "Install via winget (recommended)", cmd: "winget install --id Git.Git -e --source winget" },
         { label: "Verify installation", cmd: "git --version" },
       ],
-      note: "DeepSeek Harness relies on Git to fetch and update code.",
-    },
-    node: {
-      name: "Node.js",
-      site: "https://nodejs.org/en/download",
-      siteLabel: "the Node.js download page",
-      commands: [
-        { label: "Install LTS via winget (recommended)", cmd: "winget install --id OpenJS.NodeJS.LTS -e --source winget" },
-        { label: "Verify installation", cmd: "node -v" },
-      ],
-      note: "DeepSeek Harness requires Node.js ≥ 22.19 or ≥ 24 (an LTS release is recommended).",
-    },
-    pnpm: {
-      name: "pnpm",
-      site: "https://pnpm.io/installation",
-      siteLabel: "the pnpm installation docs",
-      commands: [
-        { label: "Install globally via npm (recommended)", cmd: "npm install -g pnpm" },
-        { label: "Install via winget", cmd: "winget install --id pnpm.pnpm -e --source winget" },
-        { label: "Verify installation", cmd: "pnpm --version" },
-      ],
-      note: "DeepSeek Harness requires pnpm ≥ 11.7; install Node.js first.",
-    },
-    python: {
-      name: "Python",
-      site: "https://www.python.org/downloads/",
-      siteLabel: "the Python download page",
-      commands: [
-        { label: "Install via winget (recommended)", cmd: "winget install --id Python.Python.3.12 -e --source winget" },
-        { label: "Verify installation", cmd: "python --version" },
-      ],
-      note: "Recommended (optional): some extensions use Python, but its absence does not block installing, starting or updating DeepSeek Harness.",
+      note: "Installing and updating DeepSeek Harness from source relies on Git to fetch code.",
     },
   },
 };
@@ -224,7 +162,7 @@ function toolCard(t: ToolStatus, meta: ToolMeta, g: GuideStrings): string {
 /** 生成完整的安装指引 HTML 文档（以 blob URL 形式在新 tab 打开）。 */
 export function buildInstallGuideHtml(tools: ToolStatus[], lang: Lang): string {
   const g = lang === "zh-CN" ? zh : en;
-  const order = ["git", "node", "pnpm", "python"];
+  const order = ["git"];
   const sorted = [...tools].sort((a, b) => {
     const ia = order.indexOf(a.id);
     const ib = order.indexOf(b.id);

@@ -96,8 +96,23 @@ pub fn default_branch(dir: &Path) -> Result<String, AppError> {
     ))
 }
 
-/// 执行完整检测：fetch → 对比 → 结果。
-pub fn check_for_updates_in_dir(dir: &Path) -> Result<UpdateCheckResult, AppError> {
+/// 执行完整检测。`mode` = "prebuilt" 时走 GitHub release 比对（无需 git）；
+/// `mode` = "source" 时走 git fetch → 对比。`current_version` 用于预构建模式
+/// 比对当前安装的 tag（源码模式忽略）。
+pub fn check_for_updates_in_dir(
+    dir: &Path,
+    mode: &str,
+    current_version: Option<&str>,
+) -> Result<UpdateCheckResult, AppError> {
+    if mode == "source" {
+        check_for_updates_git(dir)
+    } else {
+        check_for_updates_prebuilt(current_version)
+    }
+}
+
+/// 源码模式：git fetch → 对比本地 HEAD 与 origin 默认分支。
+fn check_for_updates_git(dir: &Path) -> Result<UpdateCheckResult, AppError> {
     run_git_capture(dir, &git_args(&["fetch", "origin"]))?;
     let branch = default_branch(dir)?;
 
@@ -116,6 +131,49 @@ pub fn check_for_updates_in_dir(dir: &Path) -> Result<UpdateCheckResult, AppErro
         remote_commit,
         behind,
         subject,
+        checked_at: crate::config::now_string(),
+    })
+}
+
+/// 从 release tag 提取「版本号」：tag 形如 `dsh-0.1.1-rc.2-32485170079`
+/// （发布方在 semver 后追加了 `-<构建/提交号>`）。提取出 `0.1.1-rc.2` 用于与
+/// 已安装的 CLI 版本比对；无法识别时返回原 tag（保守，避免误判为无更新）。
+pub fn normalized_tag_version(tag: &str) -> String {
+    let s = tag.trim();
+    // 去掉常见前缀 dsh- / v。
+    let s = s
+        .strip_prefix("dsh-")
+        .or_else(|| s.strip_prefix("v"))
+        .unwrap_or(s);
+    let mut s = s.to_string();
+    // 反复去掉末尾的 `-<纯数字>`（构建/提交号），如 `-32485170079`。
+    loop {
+        let Some(idx) = s.rfind('-') else { break };
+        let (prefix, rest) = s.split_at(idx);
+        let suffix = &rest[1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            s = prefix.to_string();
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// 预构建模式：查询 GitHub 最新 release tag，与当前安装 tag 比对。
+/// 比较时以归一化后的版本号为准（tag 可能带 `dsh-` 前缀与 `-<提交号>` 后缀，
+/// 与已安装的 CLI 版本不完全一致）。
+fn check_for_updates_prebuilt(current_version: Option<&str>) -> Result<UpdateCheckResult, AppError> {
+    let release = crate::prebuilt::latest_release()?;
+    let current = current_version.unwrap_or("").trim();
+    let latest_v = normalized_tag_version(&release.tag);
+    let update_available = !latest_v.is_empty() && latest_v != current;
+    Ok(UpdateCheckResult {
+        update_available,
+        local_commit: current.to_string(),
+        remote_commit: release.tag.clone(),
+        behind: if update_available { 1 } else { 0 },
+        subject: format!("{}（{}）", release.tag, release.url),
         checked_at: crate::config::now_string(),
     })
 }
@@ -142,5 +200,25 @@ mod tests {
         assert_eq!(parse_behind_count("42\n"), 42);
         assert_eq!(parse_behind_count("0"), 0);
         assert_eq!(parse_behind_count("abc"), 0);
+    }
+
+    #[test]
+    fn normalized_tag_version_strips_prefix_and_build_suffix() {
+        // 发布方 tag：dsh-<semver>-<默认数字提交号>。
+        assert_eq!(
+            normalized_tag_version("dsh-0.1.1-rc.2-32485170079"),
+            "0.1.1-rc.2"
+        );
+        // 纯 semver 无后缀。
+        assert_eq!(normalized_tag_version("0.1.1-rc.2"), "0.1.1-rc.2");
+        // v 前缀。
+        assert_eq!(normalized_tag_version("v2.0.0"), "2.0.0");
+        // 数字后缀。
+        assert_eq!(normalized_tag_version("0.1.1-rc.2-123"), "0.1.1-rc.2");
+        // 非纯数字后缀（如含字母的 git 短 SHA）：保守保留归一化后的前缀。
+        assert_eq!(
+            normalized_tag_version("dsh-0.1.1-rc.2-3248517a"),
+            "0.1.1-rc.2-3248517a"
+        );
     }
 }

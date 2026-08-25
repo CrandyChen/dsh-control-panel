@@ -1,11 +1,11 @@
-// 状态卡片：安装状态 / 版本 / 更新 / 时间 / 运行状态 / 目录 / 运行环境工具。
+// 状态卡片：安装状态 / 版本 / 更新 / 时间 / 运行状态 / 安装方式 / 目录。
+// 右上角提供紧凑的「设置」入口。
 
 import {
-  BookOutlined,
   CloudSyncOutlined,
   FolderOpenOutlined,
-  ReloadOutlined,
   RocketOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import {
   Badge,
@@ -18,12 +18,11 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { useState } from "react";
 import { useI18n } from "../i18n";
 import type {
   AppConfig,
   DetectResult,
-  ToolStatus,
+  InstallMode,
   UpdateCheckResult,
   WebStatus,
 } from "../types";
@@ -31,15 +30,11 @@ import type {
 interface Props {
   config: AppConfig | null;
   detect: DetectResult | null;
-  /** 运行环境工具检测结果（git/node/pnpm 必装 + python 推荐）。 */
-  tools: ToolStatus[] | null;
   webStatus: WebStatus;
   lastCheck: UpdateCheckResult | null;
   busy: boolean;
-  /** 打开安装指引 tab。 */
-  onOpenGuide: () => void;
-  /** 手动重新检测运行环境（git/node/pnpm/python）。 */
-  onDetectTools: () => Promise<void>;
+  /** 打开设置抽屉。 */
+  onOpenSettings: () => void;
 }
 
 const STATUS_KEYS: Record<WebStatus, string> = {
@@ -58,61 +53,20 @@ const STATUS_COLORS: Record<WebStatus, string> = {
   error: "error",
 };
 
-/** 单个工具的状态标签。 */
-function ToolTag({ tool }: { tool: ToolStatus }) {
-  const { t } = useI18n();
-  if (tool.installed && !tool.ok) {
-    return (
-      <Tooltip title={tool.detail ?? t("status.tool.low")}>
-        <Tag color="orange" style={{ marginInlineEnd: 0 }}>
-          {tool.name} ⚠ {tool.version}
-        </Tag>
-      </Tooltip>
-    );
-  }
-  if (tool.installed) {
-    return (
-      <Tag color="green" style={{ marginInlineEnd: 0 }}>
-        {tool.name} ✓ {tool.version}
-      </Tag>
-    );
-  }
-  // 未安装：必装项红色，推荐项（python）蓝色。
-  return (
-    <Tag color={tool.required ? "red" : "blue"} style={{ marginInlineEnd: 0 }}>
-      {tool.name} {tool.required ? t("status.tool.missing") : t("status.tool.optional")}
-    </Tag>
-  );
-}
-
 export default function StatusCard({
   config,
   detect,
-  tools,
   webStatus,
   lastCheck,
   busy,
-  onOpenGuide,
-  onDetectTools,
+  onOpenSettings,
 }: Props) {
   const { token } = theme.useToken();
   const { t } = useI18n();
   const installed = detect?.installed ?? false;
   const updateAvailable = config?.updateAvailable ?? false;
   const updateSubject = config?.latestSubject || lastCheck?.subject || null;
-  const anyToolMissing = (tools ?? []).some((tool) => !tool.installed || !tool.ok);
-  const [detecting, setDetecting] = useState(false);
-
-  /** 手动触发运行环境检测：按钮转圈，完成后刷新标签。 */
-  const handleDetect = async () => {
-    if (detecting) return;
-    setDetecting(true);
-    try {
-      await onDetectTools();
-    } finally {
-      setDetecting(false);
-    }
-  };
+  const mode: InstallMode = config?.installMode ?? "prebuilt";
 
   return (
     <Card
@@ -123,6 +77,17 @@ export default function StatusCard({
           <span>{t("status.title")}</span>
           {updateAvailable && <Badge status="error" />}
         </Flex>
+      }
+      extra={
+        <Tooltip title={t("settings.title")}>
+          <Button
+            type="text"
+            size="small"
+            icon={<SettingOutlined />}
+            aria-label={t("settings.title")}
+            onClick={onOpenSettings}
+          />
+        </Tooltip>
       }
       styles={{ body: { padding: "12px 16px" } }}
     >
@@ -154,6 +119,15 @@ export default function StatusCard({
             ),
           },
           {
+            key: "mode",
+            label: t("status.mode"),
+            children: (
+              <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                {mode === "prebuilt" ? t("status.mode.prebuilt") : t("status.mode.source")}
+              </Tag>
+            ),
+          },
+          {
             key: "version",
             label: t("status.version"),
             children: (
@@ -162,7 +136,7 @@ export default function StatusCard({
                 <Typography.Text copyable={!!detect?.version}>
                   {detect?.version ?? "—"}
                 </Typography.Text>
-                {detect?.installedCommit && (
+                {mode === "source" && detect?.installedCommit && (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     {detect.installedCommit.slice(0, 7)}
                   </Typography.Text>
@@ -252,46 +226,6 @@ export default function StatusCard({
           },
         ]}
       />
-
-      {/* 运行环境：git / node / pnpm（必装）+ python（推荐），缺失时可查看安装指引 */}
-      <div
-        style={{
-          marginTop: 10,
-          paddingTop: 10,
-          borderTop: `1px solid ${token.colorBorderSecondary}`,
-        }}
-      >
-        <Flex align="center" justify="space-between" gap={8} wrap>
-          <Flex align="center" gap={8} wrap>
-            <Typography.Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
-              {t("status.env")}
-            </Typography.Text>
-            {tools === null && (
-              <Tag color="default" style={{ marginInlineEnd: 0 }}>
-                {t("status.env.checking")}
-              </Tag>
-            )}
-            {tools?.map((tool) => (
-              <ToolTag key={tool.id} tool={tool} />
-            ))}
-          </Flex>
-          <Flex align="center" gap={4} wrap>
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              loading={detecting}
-              onClick={() => void handleDetect()}
-            >
-              {t("status.env.detect")}
-            </Button>
-            {anyToolMissing && (
-              <Button size="small" type="link" icon={<BookOutlined />} onClick={onOpenGuide}>
-                {t("status.env.guide")}
-              </Button>
-            )}
-          </Flex>
-        </Flex>
-      </div>
     </Card>
   );
 }

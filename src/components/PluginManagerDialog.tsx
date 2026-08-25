@@ -142,7 +142,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     }
   }, []);
 
-  /** 通用操作包装：置忙 → 执行 → 结果提示 → 成功后清空输入并刷新列表。返回执行结果（失败为 null）。 */
+  /** 通用操作包装：置忙 → （若 web 运行则先自动停止）→ 执行 → 结果提示 → 成功后清空输入并刷新列表，
+   * 结束后（无论成败）若之前运行则自动重新启动 web。返回执行结果（失败为 null）。 */
   const runOp = useCallback(
     async (label: string, run: () => Promise<PluginOpResult>): Promise<PluginOpResult | null> => {
       setBusy(true);
@@ -150,7 +151,11 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       setResult(null);
       setDetail([]);
       setDetailOpen(false);
+      const wasRunning = webRunning;
       try {
+        if (wasRunning) {
+          await api.stopWeb();
+        }
         const r = await run();
         setResult({ ok: r.ok, message: r.message });
         if (r.ok) {
@@ -163,11 +168,15 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         setDetailOpen(true);
         return null;
       } finally {
+        // 操作前停掉了 web，操作后自动恢复；不设置 startedByUs，避免自动打开 DSH Tab。
+        if (wasRunning) {
+          api.startWeb(() => undefined).catch(() => undefined);
+        }
         setBusy(false);
         setBusyLabel(null);
       }
     },
-    [loadList, profile],
+    [loadList, profile, webRunning],
   );
 
   /** 智能安装：输入由后端解析（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。 */
@@ -177,13 +186,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       message.warning(t("plugin.install.warn"));
       return;
     }
-    void runOp(t("plugin.op.install"), () => api.pluginInstall(value, profile, onEvent)).then((r) => {
-      // 运行中安装成功后提示重启 DSH 使插件生效。
-      if (r?.ok && webRunning) {
-        message.info(t("plugin.install.restartHint"), 5);
-      }
-    });
-  }, [input, profile, onEvent, runOp, message, webRunning, t]);
+    void runOp(t("plugin.op.install"), () => api.pluginInstall(value, profile, onEvent));
+  }, [input, profile, onEvent, runOp, message, t]);
 
   const updateOne = useCallback(
     (entry: PluginEntry) => {
@@ -371,7 +375,7 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         <Space size={4}>
           <Button
             size="small"
-            disabled={busy || webRunning}
+            disabled={busy}
             onClick={() => updateOne(record)}
           >
             {t("plugin.update")}
@@ -380,7 +384,7 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
             size="small"
             danger
             type="text"
-            disabled={busy || webRunning}
+            disabled={busy}
             onClick={() => removeOne(record)}
           >
             {t("plugin.remove")}
@@ -396,8 +400,13 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       open={open}
       onCancel={onClose}
       width={800}
+      centered
       footer={<Button onClick={onClose}>{t("plugin.close")}</Button>}
       destroyOnClose
+      styles={{
+        // 内容超高时在弹窗内部滚动，避免弹窗超出视口、需滚动页面才能看全。
+        body: { maxHeight: "calc(100vh - 220px)", overflowY: "auto" },
+      }}
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         {/* profile 选择 */}
@@ -422,14 +431,6 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           </Tooltip>
         </Flex>
 
-        {webRunning && (
-          <Alert
-            type="warning"
-            showIcon
-            message={t("plugin.running.msg")}
-            description={t("plugin.running.desc")}
-          />
-        )}
         {busy && (
           <Alert
             type="info"
@@ -549,7 +550,7 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
             rowSelection={{
               selectedRowKeys: selectedKeys,
               onChange: setSelectedKeys,
-              getCheckboxProps: () => ({ disabled: busy || webRunning }),
+              getCheckboxProps: () => ({ disabled: busy }),
             }}
             locale={{ emptyText: t("plugin.empty") }}
           />
@@ -560,14 +561,14 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           <Space>
             <Button
               danger
-              disabled={busy || webRunning || selectedKeys.length === 0}
+              disabled={busy || selectedKeys.length === 0}
               onClick={removeSelected}
             >
               {selectedKeys.length > 0
                 ? t("plugin.removeSelected", { 0: selectedKeys.length })
                 : t("plugin.removeSelectedNone")}
             </Button>
-            <Button danger type="text" disabled={busy || webRunning} onClick={removeAll}>
+            <Button danger type="text" disabled={busy} onClick={removeAll}>
               {t("plugin.removeAll")}
             </Button>
           </Space>
