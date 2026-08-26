@@ -9,6 +9,7 @@
 mod config;
 mod detect;
 mod error;
+mod gitops;
 mod i18n;
 mod install;
 mod logging;
@@ -17,12 +18,14 @@ mod plugin;
 mod prebuilt;
 mod process;
 mod repair;
+mod runtime;
 mod terminal;
 mod tools;
 mod uninstall;
 mod update;
 mod version;
 mod web;
+mod balance;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,7 +126,7 @@ async fn detect_state(app: AppHandle) -> DetectResult {
     })
 }
 
-/// 检测运行环境工具（仅源码模式检测 Git；预构建模式返回空），启动时自动调用。
+/// 检测运行环境工具（git 已内置、node/pnpm 按需下载，现无必装项），启动时自动调用。
 #[tauri::command]
 fn detect_tools(app: AppHandle) -> Vec<tools::ToolStatus> {
     let logger = app.state::<AppState>().logger.clone();
@@ -143,6 +146,22 @@ fn detect_tools(app: AppHandle) -> Vec<tools::ToolStatus> {
         .join(" ");
     logger.info(&crate::i18n::t_fmt("log.tools_summary", &[&summary]));
     result
+}
+
+/// 查询 DeepSeek 当前余额（读 `$DSH_HOME/.credentials.yaml` 的 DEEPSEEK_API_KEY）。
+/// 走 spawn_blocking，避免 PowerShell 请求阻塞主线程。
+#[tauri::command]
+async fn get_balance() -> balance::BalanceResult {
+    tauri::async_runtime::spawn_blocking(balance::get_balance)
+        .await
+        .unwrap_or_else(|_| balance::BalanceResult {
+            available: false,
+            api_key_set: false,
+            is_available: None,
+            currency: None,
+            balance: None,
+            error: Some(crate::i18n::t("balance.no_key")),
+        })
 }
 
 /// 扫描本机可能手动安装的 DeepSeek Harness。
@@ -521,6 +540,7 @@ pub fn run() {
             default_parent_dir,
             detect_state,
             detect_tools,
+            get_balance,
             scan_manual_installs,
             adopt_install,
             install,
@@ -594,8 +614,18 @@ pub fn run() {
 }
 
 /// 自动版本检测：启动 4 秒后立即检测一次，之后按配置间隔循环。
-/// 除 DSH 自身更新外，同时检测默认 profile 的插件更新并发出事件（供前端徽标提示）。
+/// 除 DSH 自身更新外，同时按独立周期检测默认 profile 的插件更新并发出事件（供前端徽标提示）。
+///
+/// 两条独立线程：
+/// - **DSH 更新**：间隔 `auto_check_interval_hours`，仅当 `auto_check_enabled` 时运行；
+/// - **插件更新**：间隔 `plugin_auto_check_interval_hours`，仅当 `plugin_auto_check_enabled` 时运行。
 fn spawn_auto_check(handle: AppHandle) {
+    auto_check_dsh(handle.clone());
+    auto_check_plugins(handle);
+}
+
+/// DSH 自身更新检测循环（沿用原有逻辑）。
+fn auto_check_dsh(handle: AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(4));
         loop {
@@ -616,23 +646,44 @@ fn spawn_auto_check(handle: AppHandle) {
                             detect::read_pkg_version(std::path::Path::new(&dir))
                                 .or_else(|| cfg.installed_version.clone())
                         };
-                        match version::check_for_updates_in_dir(
+                        if let Ok(result) = version::check_for_updates_in_dir(
                             std::path::Path::new(&dir),
                             &mode,
                             current_version.as_deref(),
                         ) {
-                            Ok(result) => {
-                                let mut cfg2 = config::load_config(&handle);
-                                cfg2.update_available = result.update_available;
-                                cfg2.latest_commit = Some(result.remote_commit.clone());
-                                cfg2.latest_subject = Some(result.subject.clone());
-                                cfg2.last_check_at = Some(result.checked_at.clone());
-                                let _ = config::save_config(&handle, &cfg2);
-                                let _ = handle.emit("update-checked", &result);
-                            }
-                            Err(_) => { /* 后台检测失败静默，等待下个周期 */ }
+                            let mut cfg2 = config::load_config(&handle);
+                            cfg2.update_available = result.update_available;
+                            cfg2.latest_commit = Some(result.remote_commit.clone());
+                            cfg2.latest_subject = Some(result.subject.clone());
+                            cfg2.last_check_at = Some(result.checked_at.clone());
+                            let _ = config::save_config(&handle, &cfg2);
+                            let _ = handle.emit("update-checked", &result);
                         }
-                        // 插件更新检测（默认 profile）：失败静默，不阻断 DSH 检测。
+                    }
+                }
+            }
+            let hours = config::load_config(&handle).auto_check_interval_hours.max(1);
+            std::thread::sleep(std::time::Duration::from_secs(hours * 3600));
+        }
+    });
+}
+
+/// 插件更新检查循环（默认 profile），独立于 DSH 检测。
+fn auto_check_plugins(handle: AppHandle) {
+    std::thread::spawn(move || {
+        // 比 DSH 检测稍晚，避免启动时并发争用。
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        loop {
+            let cfg = config::load_config(&handle);
+            if cfg.plugin_auto_check_enabled {
+                if let Some(dir) = cfg.install_dir.clone() {
+                    let mode = cfg.install_mode.clone();
+                    let installed = if mode == "source" {
+                        detect::is_valid_repo(std::path::Path::new(&dir))
+                    } else {
+                        detect::is_valid_prebuilt(std::path::Path::new(&dir))
+                    };
+                    if installed {
                         let profile = cfg.plugin_profile.trim().to_string();
                         if !profile.is_empty() {
                             if let Ok(updates) = plugin::check_plugin_updates(&profile, &dir) {
@@ -645,7 +696,7 @@ fn spawn_auto_check(handle: AppHandle) {
                     }
                 }
             }
-            let hours = cfg.auto_check_interval_hours.max(1);
+            let hours = config::load_config(&handle).plugin_auto_check_interval_hours.max(1);
             std::thread::sleep(std::time::Duration::from_secs(hours * 3600));
         }
     });

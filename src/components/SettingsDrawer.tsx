@@ -19,6 +19,10 @@ export default function SettingsDrawer({ open, config, onClose, onSave }: Props)
   const { t } = useI18n();
   const [autoCheck, setAutoCheck] = useState(config?.autoCheckEnabled ?? true);
   const [interval, setInterval] = useState(config?.autoCheckIntervalHours ?? 12);
+  const [pluginAutoCheck, setPluginAutoCheck] = useState(config?.pluginAutoCheckEnabled ?? true);
+  const [pluginInterval, setPluginInterval] = useState(
+    config?.pluginAutoCheckIntervalHours ?? 12,
+  );
 
   const save = async (patch: Partial<AppConfig>) => {
     await onSave(patch);
@@ -50,6 +54,34 @@ export default function SettingsDrawer({ open, config, onClose, onSave }: Props)
               void save({ autoCheckIntervalHours: v });
             }}
             addonAfter={t("settings.interval.unit")}
+          />
+        </Form.Item>
+        <Form.Item
+          label={t("settings.pluginAutoCheck")}
+          extra={t("settings.pluginAutoCheck.extra")}
+        >
+          <Flex align="center" justify="space-between">
+            <Switch
+              checked={pluginAutoCheck}
+              onChange={(v) => {
+                setPluginAutoCheck(v);
+                void save({ pluginAutoCheckEnabled: v });
+              }}
+            />
+          </Flex>
+        </Form.Item>
+        <Form.Item label={t("settings.pluginInterval")}>
+          <InputNumber
+            min={1}
+            max={168}
+            value={pluginInterval}
+            disabled={!pluginAutoCheck}
+            onChange={(v) => {
+              if (v == null) return;
+              setPluginInterval(v);
+              void save({ pluginAutoCheckIntervalHours: v });
+            }}
+            addonAfter={t("settings.pluginInterval.unit")}
           />
         </Form.Item>
         <Form.Item label={t("settings.theme")}>

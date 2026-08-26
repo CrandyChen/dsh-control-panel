@@ -978,6 +978,8 @@ pub fn run_plugin_op(
     } else if !crate::detect::is_valid_prebuilt(&cwd) {
         return Err(AppError::NotInstalled.friendly());
     }
+    // 运行环境（node/pnpm）就绪，供 dsh / pnpm 命令使用；失败即中止（不降级系统 node）。
+    crate::runtime::ensure_runtime(channel, logger)?;
     let pdir = profile_dir(profile)?;
 
     let display = if mode == "prebuilt" {
@@ -1320,16 +1322,10 @@ fn query_latest_npm(pkg: &str, cwd: &Path) -> Option<String> {
 }
 
 /// 查询 GitHub 仓库的最高版本 tag，失败返回 None。
-fn query_latest_github_tag(repo: &str, cwd: &Path) -> Option<String> {
+fn query_latest_github_tag(repo: &str, _cwd: &Path) -> Option<String> {
     let url = format!("https://github.com/{repo}");
-    let args = vec![
-        "ls-remote".to_string(),
-        "--tags".to_string(),
-        "--refs".to_string(),
-        url,
-    ];
-    let out = run_query(&["git.cmd", "git"], &args, cwd, Duration::from_secs(20))?;
-    pick_latest_tag(&out)
+    let tags = crate::gitops::ls_remote_tags(&url).ok()?;
+    pick_latest_tag(&tags.join("\n"))
 }
 
 fn make_update_info(key: String, current: Option<String>, latest: Option<String>, source: &str) -> PluginUpdateInfo {

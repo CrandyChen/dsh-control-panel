@@ -5,7 +5,9 @@ import { createElement, useCallback, useEffect, useRef, useState } from "react";
 import { api, onLogLine, onPluginUpdatesChecked, onUpdateChecked, onWebStatus } from "./api";
 import { WEB_URL } from "./constants";
 import { useI18n } from "./i18n";
+import { formatMoney } from "./types";
 import type {
+  BalanceResult,
   BrowserTab,
   DetectResult,
   AppConfig,
@@ -43,6 +45,12 @@ export interface Panel {
   currentStep: string | null;
   /** 预构建内核下载/解压进度（step="download"|"extract"；received/total 字节、speedBps 字节/秒）；非空表示进行中。 */
   progress: { step: string; received: number; total: number; speedBps: number } | null;
+  /** 运行环境（node/pnpm）下载进度（step="runtime"）；非空表示进行中。 */
+  runtimeProgress: { step: string; received: number; total: number; speedBps: number } | null;
+  /** 当前余额（安装 DSH 且配置 API 后每 5 分钟查询一次）。 */
+  balance: BalanceResult | null;
+  /** 手动触发一次余额查询。 */
+  checkBalance: () => Promise<void>;
   /** 内嵌浏览器 Tab（纯前端状态）；activeTabId 为 null 时显示控制面板主界面。 */
   tabs: BrowserTab[];
   activeTabId: string | null;
@@ -106,6 +114,14 @@ export function usePanel(): Panel {
     total: number;
     speedBps: number;
   } | null>(null);
+  /** 运行环境（node/pnpm）下载/解压进度（step="runtime"=下载，"runtime-ex"=解压；非空表示进行中）。 */
+  const [runtimeProgress, setRuntimeProgress] = useState<{
+    step: string;
+    received: number;
+    total: number;
+    speedBps: number;
+  } | null>(null);
+  const [balance, setBalance] = useState<BalanceResult | null>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [manualCandidates, setManualCandidates] = useState<string[] | null>(null);
@@ -120,6 +136,9 @@ export function usePanel(): Panel {
   const repairSuggested = useRef(false);
   /** 用户是否请求取消本次卸载预览扫描（取消后扫描返回的错误静默处理）。 */
   const previewCancelled = useRef(false);
+  /** 低余额提醒触发标记（每会话每阈值一次；回升后再跌穿才再次提醒）。 */
+  const alerted10 = useRef(false);
+  const alerted5 = useRef(false);
   /** 最新配置快照（供事件回调读取 openUiMode 等设置，避免订阅反复重建）。 */
   const configRef = useRef(config);
   configRef.current = config;
@@ -258,6 +277,7 @@ export function usePanel(): Panel {
         setPhase("idle");
         setCurrentStep(null);
         setProgress(null);
+        setRuntimeProgress(null);
         void refresh();
       }
     },
@@ -276,6 +296,8 @@ export function usePanel(): Panel {
           const title = stepTitle(e.id, e.title);
           setCurrentStep(title);
           setProgress(null);
+          // 运行环境与「clone」并行下载；进入其它步骤（web/install/extract）时运行环境已就绪，隐藏其进度。
+          if (e.id !== "clone") setRuntimeProgress(null);
           appendLog("INFO", `▶ ${title}`);
           break;
         }
@@ -285,18 +307,35 @@ export function usePanel(): Panel {
         case "stepFinished": {
           const title = stepTitle(e.id, e.id);
           setProgress(null);
+          setRuntimeProgress(null);
           appendLog("INFO", `✓ ${title} (exit ${e.exitCode})`);
           break;
         }
         case "downloadProgress":
-          setProgress({ step: e.step, received: e.received, total: e.total, speedBps: e.speedBps });
+          if (e.step === "runtime" || e.step === "runtime-ex") {
+            setRuntimeProgress({
+              step: e.step,
+              received: e.received,
+              total: e.total,
+              speedBps: e.speedBps,
+            });
+          } else {
+            // 主进度（内核下载/解压/克隆）；不覆盖并行进行的运行环境进度。
+            setProgress({ step: e.step, received: e.received, total: e.total, speedBps: e.speedBps });
+          }
+          break;
+        case "runtimeDone":
+          // 运行环境（node/pnpm）流程结束：隐藏运行环境进度条。
+          setRuntimeProgress(null);
           break;
         case "error":
           setProgress(null);
+          setRuntimeProgress(null);
           appendLog("ERROR", e.message);
           break;
         case "finished":
           setProgress(null);
+          setRuntimeProgress(null);
           break;
       }
     },
@@ -308,6 +347,39 @@ export function usePanel(): Panel {
     setTools(tools);
     return tools;
   }, []);
+
+  /** 查询当前余额并处理低余额提醒（每会话每阈值一次；回升后再跌穿才再次提醒）。 */
+  const checkBalance = useCallback(async () => {
+    try {
+      const r = await api.getBalance();
+      setBalance(r);
+      const b = r.balance;
+      if (b == null) return;
+      if (b >= 10) alerted10.current = false;
+      if (b >= 5) alerted5.current = false;
+      if (b < 10 && b >= 5 && !alerted10.current) {
+        alerted10.current = true;
+        message.warning(t("msg.balance.low10", { 0: formatMoney(b, r.currency ?? "CNY") }), 6);
+      }
+      if (b < 5 && !alerted5.current) {
+        alerted5.current = true;
+        message.error(t("msg.balance.low5", { 0: formatMoney(b, r.currency ?? "CNY") }), 6);
+      }
+    } catch {
+      // 余额查询失败静默（卡片显示「—」）。
+    }
+  }, [message, t]);
+
+  // 安装 DSH 后每 5 分钟查询一次余额。
+  useEffect(() => {
+    if (!detect?.installed) {
+      setBalance(null);
+      return;
+    }
+    void checkBalance();
+    const timer = window.setInterval(() => void checkBalance(), 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [detect?.installed, checkBalance]);
 
   const install = useCallback(
     (dir: string, mode: string) =>
@@ -557,6 +629,9 @@ export function usePanel(): Panel {
     preview,
     currentStep,
     progress,
+    runtimeProgress,
+    balance,
+    checkBalance,
     tabs,
     activeTabId,
     manualCandidates,

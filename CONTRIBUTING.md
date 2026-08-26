@@ -41,6 +41,9 @@ released on GitHub.
    cd src-tauri && cargo test && cargo check
    ```
 
+   Building the Rust backend vendors libgit2 (git2), so it needs the MSVC C toolchain
+   (VS Build Tools with "Desktop development with C++"), same as the rest of the Tauri build.
+
 5. Push and open a Pull Request against `main`:
 
    ```bash
@@ -73,9 +76,12 @@ Releases are tag-driven. To publish a new version:
    git push origin v1.0.0
    ```
 
-3. The `release.yml` workflow builds the portable zip on a Windows runner and attaches
-   it to a GitHub Release. After it finishes, edit the release notes on GitHub
-   (summary of changes, screenshots from `assets/`, checksums if desired).
+3. The `release.yml` workflow builds the **lightweight portable zip**
+   (`pnpm portable --no-runtime`) on a Windows runner and attaches it to a GitHub
+   Release. This zip does not bundle the Node.js/pnpm runtime (it is downloaded on the
+   first install) and Git is built-in via libgit2, so it is much smaller. After the
+   workflow finishes, edit the release notes on GitHub (summary of changes, screenshots
+   from `assets/`, checksums if desired).
 
 ## Reporting issues
 

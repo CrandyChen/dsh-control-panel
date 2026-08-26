@@ -125,10 +125,14 @@ pub struct AppConfig {
     pub latest_commit: Option<String>,
     /// 远程最新提交主题。
     pub latest_subject: Option<String>,
-    /// 是否启用定时自动检测。
+    /// 是否启用定时自动检测（DSH 自身更新）。
     pub auto_check_enabled: bool,
     /// 自动检测间隔（小时）。
     pub auto_check_interval_hours: u64,
+    /// 是否启用定时自动检测插件更新（默认 profile）。
+    pub plugin_auto_check_enabled: bool,
+    /// 插件自动检测间隔（小时）。
+    pub plugin_auto_check_interval_hours: u64,
     /// 是否使用 `pnpm dsh` 执行 dsh 命令（全局 `dsh` 不可识别时置 true；启动时自动探测）。
     pub use_pnpm_dsh: bool,
     /// 插件管理默认操作的 profile 名称。
@@ -155,6 +159,8 @@ impl Default for AppConfig {
             latest_subject: None,
             auto_check_enabled: true,
             auto_check_interval_hours: 12,
+            plugin_auto_check_enabled: true,
+            plugin_auto_check_interval_hours: 12,
             use_pnpm_dsh: true,
             plugin_profile: "web".to_string(),
             open_ui_mode: "tab".to_string(),
@@ -255,6 +261,8 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.auto_check_enabled, true);
         assert_eq!(cfg.auto_check_interval_hours, 12);
+        assert_eq!(cfg.plugin_auto_check_enabled, true);
+        assert_eq!(cfg.plugin_auto_check_interval_hours, 12);
         assert_eq!(cfg.install_dir, None);
         assert_eq!(cfg.use_pnpm_dsh, true);
         assert_eq!(cfg.plugin_profile, "web");
@@ -287,6 +295,15 @@ mod tests {
         let json = r#"{"installDir":"D:/x"}"#;
         let cfg: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.open_ui_mode, "tab");
+    }
+
+    #[test]
+    fn config_missing_plugin_auto_check_fields_default_on() {
+        // 旧配置无 plugin 自动检测字段：serde default 补全为开启 + 12 小时。
+        let json = r#"{"installDir":"D:/x"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.plugin_auto_check_enabled, true);
+        assert_eq!(cfg.plugin_auto_check_interval_hours, 12);
     }
 
     #[test]

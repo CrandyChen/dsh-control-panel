@@ -41,14 +41,14 @@ pub fn update(
     }
 }
 
-/// 源码更新：git pull → pnpm install → pnpm run build。
+/// 源码更新：fetch → reset 到默认分支 → pnpm install → pnpm run build（git 由 gitops 完成）。
 fn update_source(
     app: &AppHandle,
     path: &PathBuf,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
-    // git pull 前先检查仓库主机可达性（网络不可达直接报错，不执行 git 操作）。
+    // git 操作前先检查仓库主机可达性（网络不可达直接报错，不执行 git 操作）。
     crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
 
     // 更新前自动停止 web 服务（避免文件占用，更新完成后由用户重新启动）。
@@ -56,15 +56,29 @@ fn update_source(
         let _ = crate::web::stop_web(app);
     }
 
+    // 更新前确保运行环境（node/pnpm）就绪，供后续 install/build 使用。
+    crate::runtime::ensure_runtime(channel, logger)?;
+
+    // git pull --ff-only 等价：fetch 后硬重置到 origin 默认分支。
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "pull".into(),
+        title: crate::i18n::t("step.pull"),
+    });
+    let pull_result = (|| -> Result<(), String> {
+        crate::gitops::fetch(path).map_err(|e| e.friendly())?;
+        let branch = crate::version::default_branch(path).map_err(|e| e.friendly())?;
+        crate::gitops::reset_hard(path, &format!("origin/{branch}")).map_err(|e| e.friendly())?;
+        Ok(())
+    })();
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "pull".into(),
+        exit_code: pull_result.as_ref().map(|_| 0).unwrap_or(-1),
+    });
+    if let Err(msg) = pull_result {
+        return Err(format!("{msg}{}", crate::i18n::t("update.pull.hint")));
+    }
+
     let steps = vec![
-        Step {
-            id: "pull",
-            title: "拉取最新代码（git pull --ff-only）",
-            program: "git",
-            args: vec!["pull".into(), "--ff-only".into()],
-            cwd: Some(path.clone()),
-            envs: vec![("GIT_TERMINAL_PROMPT", "0".into())],
-        },
         Step {
             id: "install",
             title: "安装依赖（pnpm install）",
@@ -83,19 +97,7 @@ fn update_source(
         },
     ];
 
-    match run_pipeline(&steps, channel, logger) {
-        Ok(()) => {}
-        Err(e) => {
-            let mut msg = e.friendly();
-            if let AppError::StepFailed { step, .. } = &e {
-                // 步骤标题已本地化：中英文均内嵌 `git pull` 命令串，据此判断拉取步骤。
-                if step.contains("git pull") {
-                    msg.push_str(&crate::i18n::t("update.pull.hint"));
-                }
-            }
-            return Err(msg);
-        }
-    }
+    run_pipeline(&steps, channel, logger).map_err(|e| e.friendly())?;
 
     let mut cfg = config::load_config(app);
     cfg.installed_version = read_version(path);

@@ -26,6 +26,9 @@ import { basename, dirname, join, resolve } from "node:path";
 const root = resolve(".");
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const exeName = "DSH-Control-Panel.exe";
+// 是否跳过内置运行时：`--no-runtime` 或环境变量 `NO_BUNDLE_RUNTIME=1`。
+// 开启后 zip 仅含 exe + README（运行时在首次安装时由应用自动下载，显著减小体积）。
+const noRuntime = process.argv.includes("--no-runtime") || process.env.NO_BUNDLE_RUNTIME === "1";
 // Tauri 是否将主程序重命名为 productName 取决于构建配置：兼容两种产物名。
 const exeCandidates = [
   join(root, "src-tauri", "target", "release", exeName),
@@ -38,7 +41,7 @@ const zipPath = join(root, "dist-portable", `${folderName}.zip`);
 // 内置运行时回退下载版本（可在此调整；DSH 要求 Node.js ≥ 22.19 或 ≥ 24，pnpm ≥ 11.7）。
 // 注意：仅在「无法从现有环境复制」时才联网下载；正常本机/CI 会直接复制现有环境。
 const NODE_VER = "24.19.0";
-const PNPM_VER = "11.24.0";
+const PNPM_VER = "11.23.0";
 
 /** 依次尝试多个下载地址，返回首个成功后落盘的本地路径。 */
 function downloadFirst(urls, dest) {
@@ -232,29 +235,49 @@ function effectiveExtractRoot(src) {
   return src;
 }
 
-/** 从网络下载运行时（现有环境不可用时回退）。 */
+/** 从网络下载运行时（现有环境不可用时回退）。国内优先，国外备用。 */
 function downloadRuntime(dst) {
   // Node：node-v24.19.0-win-x64.zip → 解压到 nodeEx → 平铺到 runtime。
+  // 国内 npmmirror 优先，国外 nodejs.org 备用。
   const nodeZip = join(root, "dist-portable", "node-win.zip");
   const nodeEx = join(root, "dist-portable", `node-v${NODE_VER}-win-x64`);
   tempArtifacts.push(nodeZip, nodeEx);
-  downloadFirst([`https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-win-x64.zip`], nodeZip);
+  downloadFirst(
+    [
+      `https://registry.npmmirror.com/-/binary/node/v${NODE_VER}/node-v${NODE_VER}-win-x64.zip`,
+      `https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-win-x64.zip`,
+    ],
+    nodeZip,
+  );
   extractZip(nodeZip, nodeEx);
   flattenMove(effectiveExtractRoot(nodeEx), dst);
 
-  // pnpm：GitHub 官方 standalone zip（资产名 pnpm-win32-x64.zip）。
-  const pnpmZip = join(root, "dist-portable", "pnpm.zip");
+  // pnpm：国内 npm 镜像 tgz（JS 包，由 node 运行）优先，GitHub standalone 备用。
+  const pnpmTgz = join(root, "dist-portable", "pnpm.tgz");
   const pnpmEx = join(root, "dist-portable", "pnpm-ex");
-  tempArtifacts.push(pnpmZip, pnpmEx);
-  downloadFirst(
-    [
-      `https://github.com/pnpm/pnpm/releases/download/v${PNPM_VER}/pnpm-win32-x64.zip`,
-      `https://github.com/pnpm/pnpm/releases/download/v${PNPM_VER}/pnpm-win-x64.zip`,
-    ],
-    pnpmZip,
-  );
-  extractZip(pnpmZip, pnpmEx);
-  flattenMove(effectiveExtractRoot(pnpmEx), dst);
+  tempArtifacts.push(pnpmTgz, pnpmEx);
+  let pnpmOk = false;
+  try {
+    downloadFirst([`https://registry.npmmirror.com/pnpm/-/pnpm-${PNPM_VER}.tgz`], pnpmTgz);
+    extractZip(pnpmTgz, pnpmEx);
+    pnpmOk = installPnpmPackage(dst, effectiveExtractRoot(pnpmEx));
+  } catch (e) {
+    console.log(`   pnpm tgz 安装失败：${e.message}，回退 GitHub standalone...`);
+  }
+  if (!pnpmOk) {
+    const pnpmZip = join(root, "dist-portable", "pnpm.zip");
+    const pnpmEx2 = join(root, "dist-portable", "pnpm-ex2");
+    tempArtifacts.push(pnpmZip, pnpmEx2);
+    downloadFirst(
+      [
+        `https://github.com/pnpm/pnpm/releases/download/v${PNPM_VER}/pnpm-win32-x64.zip`,
+        `https://github.com/pnpm/pnpm/releases/download/v${PNPM_VER}/pnpm-win-x64.zip`,
+      ],
+      pnpmZip,
+    );
+    extractZip(pnpmZip, pnpmEx2);
+    flattenMove(effectiveExtractRoot(pnpmEx2), dst);
+  }
 }
 
 console.log(`[1/5] 构建 Tauri 应用（版本 ${version}）...`);
@@ -273,41 +296,48 @@ copyFileSync(exePath, join(distDir, exeName));
 
 console.log("[3/5] 组装内置运行时（Node + pnpm）...");
 const runtimeDir = join(distDir, "runtime");
-mkdirSync(runtimeDir, { recursive: true });
-
 // 打包临时产物：结束时统一清理，避免残留在 dist-portable。
 const tempArtifacts = [];
 
-try {
-  // 优先从现有开发环境复制全局 Node / pnpm（更可靠、无需联网）；失败才回退下载。
-  console.log("   尝试从现有环境复制运行时...");
-  const nodeOk = copyNodeFromEnv(runtimeDir);
-  const pnpmOk = copyPnpmFromEnv(runtimeDir);
+if (noRuntime) {
+  console.log("   [--no-runtime] 跳过内置运行时；首次安装时由应用自动下载（Node.js + pnpm）。");
+} else {
+  mkdirSync(runtimeDir, { recursive: true });
 
-  if (!nodeOk || !pnpmOk) {
-    console.log(
-      `   现有环境复制不完整（node=${nodeOk} pnpm=${pnpmOk}），回退到网络下载...`,
-    );
-    // 网络下载会整包写入 runtime，先清空已复制内容避免混合。
-    rmSync(runtimeDir, { recursive: true, force: true });
-    mkdirSync(runtimeDir, { recursive: true });
-    downloadRuntime(runtimeDir);
+  try {
+    // 优先从现有开发环境复制全局 Node / pnpm（更可靠、无需联网）；失败才回退下载。
+    console.log("   尝试从现有环境复制运行时...");
+    const nodeOk = copyNodeFromEnv(runtimeDir);
+    const pnpmOk = copyPnpmFromEnv(runtimeDir);
+
+    if (!nodeOk || !pnpmOk) {
+      console.log(
+        `   现有环境复制不完整（node=${nodeOk} pnpm=${pnpmOk}），回退到网络下载...`,
+      );
+      // 网络下载会整包写入 runtime，先清空已复制内容避免混合。
+      rmSync(runtimeDir, { recursive: true, force: true });
+      mkdirSync(runtimeDir, { recursive: true });
+      downloadRuntime(runtimeDir);
+    }
+
+    // 源码模式固定用 pnpm.cmd，确保 runtime 中一定存在可执行的 pnpm.cmd。
+    if (!ensurePnpmCmd(runtimeDir)) {
+      throw new Error("内置运行时缺少可执行的 pnpm.cmd");
+    }
+
+    verifyRuntime(runtimeDir);
+  } catch (e) {
+    console.error("[3/5] 内置运行时组装失败：", e.message);
+    throw e;
   }
-
-  // 源码模式固定用 pnpm.cmd，确保 runtime 中一定存在可执行的 pnpm.cmd。
-  if (!ensurePnpmCmd(runtimeDir)) {
-    throw new Error("内置运行时缺少可执行的 pnpm.cmd");
-  }
-
-  verifyRuntime(runtimeDir);
-} catch (e) {
-  console.error("[3/5] 内置运行时组装失败：", e.message);
-  throw e;
 }
 
 console.log("[3/5] 运行时组装完成。");
 
 console.log("[4/5] 生成 README.txt ...");
+const runtimeLine = noRuntime
+  ? "  · Node.js 与 pnpm 在首次安装/启动时自动下载（国内源优先、国外备用；不依赖本机全局安装，失败则提示并停止）"
+  : "  · Node.js 与 pnpm 已内置（无需单独下载）";
 writeFileSync(
   join(distDir, "README.txt"),
   [
@@ -319,18 +349,18 @@ writeFileSync(
     "  · Windows 10 / 11（64 位）",
     "  · WebView2 Runtime（Win11 自带，Win10 缺失时请到",
     "    https://developer.microsoft.com/microsoft-edge/webview2/ 安装）",
-    "  · 内置 Node.js 与 pnpm（无需单独安装）",
-    "  · 源码安装模式需要 Git（预构建内核模式不需要）",
+    runtimeLine,
+    "  · Git 已内置（源码安装模式无需安装 Git）",
     "",
     "安装 DeepSeek Harness（两种模式任选）：",
     "  1. 预构建内核（默认）：从 GitHub 下载最新 deepseek-harness-pkg-windows.zip，",
-    "     解压到程序目录下的 dsh 子目录，无需 Git / Node.js / pnpm。",
+    "     解压到程序目录下的 dsh 子目录，无需 Git / Node.js / pnpm（运行环境自动下载）。",
     "  2. 源码安装：点击「安装」选择父目录（默认程序运行目录），自动创建",
     "     deepseek-harness 子目录，依次执行：",
     "     git clone https://github.com/deepseek-ai/deepseek-harness.git",
     "     pnpm install",
     "     pnpm run build",
-    "     （需本机已安装 Git；Node.js 与 pnpm 已内置）",
+    "     （Git 已内置；Node.js 与 pnpm 安装时自动下载）",
     "",
     "使用方法：",
     "  1. 双击 DSH-Control-Panel.exe 启动（无需安装，解压即用）",

@@ -13,8 +13,9 @@ It can also be used as DSH's desktop client.
 
 DSH Control Panel wraps DeepSeek Harness's common terminal operations — **install**, **update**, **uninstall**, **start**, **stop**, **repair**, and **plugin management** — into a graphical interface for easy use. It also has built-in web access, so it can be used as DSH's desktop client.
 
-- **Self-contained & portable**: Developed with Tauri 2, a portable build that runs right after extraction; Node.js and pnpm are bundled, so users don't need to install a runtime separately.
-- **DSH dual install modes**: Downloads the **prebuilt kernel** by default; you can also install from the official source (which then requires Git on your machine).
+- **Self-contained & portable**: Developed with Tauri 2, a portable build that runs right after extraction; Node.js and pnpm are downloaded automatically on first install/start (domestic mirror preferred, overseas fallback; pnpm supports both the npm-mirror JS package and the standalone binary), and Git is built-in (git2 / libgit2), so users don't need to install any runtime separately.
+- **DSH dual install modes**: Downloads the **prebuilt kernel** by default; you can also install from the official source (Git is built-in, no separate install needed).
+- **Current balance**: After configuring the DSH API key, the Overview shows your current balance, refreshed every 5 minutes, with a red warning and one-click top-up when the balance is low.
 - **Stay up-to-date**: Automatically checks the latest version of DSH; you can choose to upgrade to the latest.
 - **Non-intrusive to DSH**: Only wraps DSH-related CLI operations without modifying its source code.
 
@@ -24,9 +25,9 @@ DSH Control Panel wraps DeepSeek Harness's common terminal operations — **inst
 | --- | --- |
 | Windows | 10 / 11 (64-bit) |
 | WebView2 Runtime | Included in Win11; install from Microsoft for Win10 if missing |
-| Git | **Only needed for the source install mode**; not needed for the prebuilt-kernel mode |
+| Git | Built-in (git2 / libgit2); no separate install needed |
 
-Node.js and pnpm are bundled with the control panel; no separate install is needed.
+Node.js and pnpm are downloaded automatically on first install/start (the npmmirror domestic source is tried first, overseas as a fallback, retried up to 3 rounds); no separate install is needed, and the app does **not** depend on a globally installed node/pnpm. If the download fails it shows an error and stops the install.
 
 ## DSH download sources
 
@@ -40,7 +41,9 @@ Node.js and pnpm are bundled with the control panel; no separate install is need
 Click "Install" and choose an install mode:
 
 - **Prebuilt kernel (default)**: Downloads the latest `deepseek-harness-pkg-windows.zip` from GitHub ([deepseek-harness-pkg](https://github.com/dsh-tauri-desk/deepseek-harness-pkg)) and extracts it into the `dsh` subdirectory under the program directory.
-- **From official source**: Pick a parent directory (defaults to the program directory); the control panel creates a `deepseek-harness` subdirectory and runs `git clone` → `pnpm install` → `pnpm run build`. This mode requires Git on your machine.
+- **From official source**: Pick a parent directory (defaults to the program directory); the control panel creates a `deepseek-harness` subdirectory and runs `git clone` → `pnpm install` → `pnpm run build`. Git is built-in (no install needed); Node.js and pnpm are downloaded automatically during install.
+
+> The runtime (Node.js + pnpm) is downloaded in parallel with the DSH kernel after you click "Install", so no environment has to be prepared in advance. The download prefers the domestic source and falls back to the overseas one, retrying each dependency up to 3 rounds; if it still fails it reports "cannot download dependencies" and stops, and does **not** fall back to a locally installed node/pnpm.
 
 ## Feature Overview
 
@@ -67,7 +70,12 @@ Click "Install" and choose an install mode:
 - **Open Terminal**: Opens PowerShell in the installation directory.
 - **Open UI**: Opens the DSH Web UI in the system browser or a new in-app tab (configurable).
 - **Logs**: Daily-rotated log files next to the exe (keeps 5 copies), viewable in real-time within the panel.
-- **Settings**: Scheduled new-version check interval, theme, language, etc.
+- **Settings**: Scheduled new-version check interval, scheduled plugin-update check interval, theme, language, etc.
+
+### 7. Current Balance
+- Shows the DeepSeek account balance on the Overview. Requires DSH installed and a `DEEPSEEK_API_KEY` configured in `~/.dsh/.credentials.yaml`.
+- Refreshes automatically every 5 minutes; when the balance falls below ¥10 the text turns red and warns once, and below ¥5 it warns again.
+- A "Top up" link beside the balance opens the top-up page in your default browser.
 
 ## Screenshots
 
@@ -80,7 +88,7 @@ Plugin Management
 ## Download & Install
 
 - Download the portable zip from [Releases](https://github.com/CrandyChen/dsh-control-panel/releases):
-  Extract and double-click `DSH-Control-Panel.exe` — no installation required; the runtime is bundled.
+  Extract and double-click `DSH-Control-Panel.exe` — no installation required (Node.js/pnpm are downloaded automatically on first install/start; Git is built-in).
 - Or build from source (see below).
 
 ## Development Environment
@@ -95,7 +103,8 @@ Building the control panel itself requires:
 pnpm install
 pnpm tauri dev          # Dev mode (hot reload)
 pnpm tauri build        # Build exe
-pnpm portable           # Build and package a portable zip with the bundled runtime → dist-portable/
+pnpm portable           # Build and package a portable zip → dist-portable/ (bundles the runtime by default)
+pnpm portable --no-runtime   # Package a lightweight zip without the bundled runtime (auto-downloads on first install)
 ```
 
 ## Directory Structure
@@ -106,8 +115,9 @@ src/                     React frontend (antd 5, light/dark themes, bilingual)
   usePanel.ts            Core state hook (config/detect/stage/log/tab/action)
   components/            Dialogs and panels (install/update/repair/plugin/uninstall, etc.)
 src-tauri/src/           Rust backend (config/logging/process/detect/tools/net/version/
-                         install/update/repair/uninstall/web/plugin/prebuilt/terminal/i18n)
-scripts/                 Portable packaging (pnpm portable, bundles the Node.js/pnpm runtime)
+                         install/update/repair/uninstall/web/plugin/prebuilt/terminal/i18n/
+                         gitops/runtime/balance)
+scripts/                 Portable packaging (pnpm portable; bundles the Node.js/pnpm runtime, or --no-runtime to skip)
 assets/                  Screenshots referenced by README
 .github/workflows/       CI: build.yml (check) + release.yml (auto-release zip on tag)
 ```

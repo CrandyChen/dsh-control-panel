@@ -140,59 +140,50 @@ fn run_step(
 // ─────────────────────────────── L2 / L3 重建 ───────────────────────────────
 
 /// 完整重建：fetch → reset --hard → clean → install（含构建拦截自动放行）→ build。
-/// 成功返回 Ok(())；失败返回 Err(描述)（供上层升级处理）。
+/// git 操作由 gitops/libgit2 完成；成功返回 Ok(())；失败返回 Err(描述)（供上层升级处理）。
 fn try_rebuild(
     dir: &Path,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
-    let git_envs = [("GIT_TERMINAL_PROMPT", "0".to_string())];
     // fetch 必须最先执行：origin/HEAD 可能因中断而陈旧。
-    let fetch = run_step(
-        "repair-fetch",
-        "拉取远程引用（git fetch origin）",
-        &["git"],
-        &["fetch".into(), "origin".into()],
-        dir,
-        &git_envs,
-        channel,
-        logger,
-    )?;
-    if !fetch.ok {
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "repair-fetch".into(),
+        title: crate::i18n::t("step.repair-fetch"),
+    });
+    let fetch = crate::gitops::fetch(dir).map_err(|e| e.friendly());
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "repair-fetch".into(),
+        exit_code: if fetch.is_ok() { 0 } else { -1 },
+    });
+    if fetch.is_err() {
         return Err(crate::i18n::t("repair.fetch.failed"));
     }
     let branch = crate::version::default_branch(dir).map_err(|e| e.friendly())?;
-    let reset = run_step(
-        "repair-reset",
-        &format!("重置到远程默认分支（git reset --hard origin/{branch}）"),
-        &["git"],
-        &["reset".into(), "--hard".into(), format!("origin/{branch}")],
-        dir,
-        &git_envs,
-        channel,
-        logger,
-    )?;
-    if !reset.ok {
+    // reset --hard origin/<默认分支>
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "repair-reset".into(),
+        title: crate::i18n::t("step.repair-reset"),
+    });
+    let reset = crate::gitops::reset_hard(dir, &format!("origin/{branch}")).map_err(|e| e.friendly());
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "repair-reset".into(),
+        exit_code: if reset.is_ok() { 0 } else { -1 },
+    });
+    if reset.is_err() {
         return Err(crate::i18n::t("repair.reset.failed"));
     }
-    let clean = run_step(
-        "repair-clean",
-        "清理多余文件（git clean -fdx，保留 node_modules）",
-        &["git"],
-        &[
-            "clean".into(),
-            "-fdx".into(),
-            "-e".into(),
-            "node_modules".into(),
-            "-e".into(),
-            ".venv".into(),
-        ],
-        dir,
-        &git_envs,
-        channel,
-        logger,
-    )?;
-    if !clean.ok {
+    // clean -fdx（保留 node_modules / .venv / .git）
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "repair-clean".into(),
+        title: crate::i18n::t("step.repair-clean"),
+    });
+    let clean = crate::gitops::clean(dir).map_err(|e| e.friendly());
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "repair-clean".into(),
+        exit_code: if clean.is_ok() { 0 } else { -1 },
+    });
+    if clean.is_err() {
         return Err(crate::i18n::t("repair.clean.failed"));
     }
     install_and_build(dir, channel, logger)
@@ -204,6 +195,8 @@ fn install_and_build(
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
+    // 运行环境（node/pnpm）就绪，供 pnpm 命令使用。
+    crate::runtime::ensure_runtime(channel, logger)?;
     let mut install = run_step(
         "repair-install",
         "安装依赖（pnpm install）",
@@ -333,10 +326,6 @@ fn reinstall(
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| crate::i18n::t("repair.no.parent"))?
-        .to_path_buf();
     let _ = channel.send(PipelineEvent::StepStarted {
         id: "repair-remove".into(),
         title: "删除损坏的安装目录（保底重装）".into(),
@@ -352,17 +341,18 @@ fn reinstall(
         exit_code: 0,
     });
     let url = config::repo_url();
-    let clone = run_step(
-        "repair-clone",
-        "重新克隆仓库（git clone）",
-        &["git"],
-        &["clone".into(), url, dir.to_string()],
-        &parent,
-        &[("GIT_TERMINAL_PROMPT", "0".into())],
-        channel,
-        logger,
-    )?;
-    if !clone.ok {
+    // 确保运行环境就绪后再克隆（克隆后 pnpm install/build 需要）。
+    crate::runtime::ensure_runtime(channel, logger)?;
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "repair-clone".into(),
+        title: crate::i18n::t("step.repair-clone"),
+    });
+    let clone = crate::gitops::clone_with_progress(&url, path, channel, "clone").map_err(|e| e.friendly());
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "repair-clone".into(),
+        exit_code: if clone.is_ok() { 0 } else { -1 },
+    });
+    if clone.is_err() {
         return Err(crate::i18n::t("repair.clone.failed"));
     }
     install_and_build(path, channel, logger)
@@ -423,7 +413,8 @@ pub fn repair(
     Ok(())
 }
 
-/// 源码模式修复：前置校验（网络 / git）→ L1 清理 → L2/L3 重建 → L5 保底重装。
+/// 源码模式修复：前置校验（网络）→ L1 清理 → L2/L3 重建 → L5 保底重装。
+/// git 由 gitops/libgit2 完成，无需外部 Git 环境。
 fn repair_source(
     app: &AppHandle,
     dir: &str,
@@ -431,16 +422,8 @@ fn repair_source(
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
-    // L0：前置校验（网络 / 运行环境）。git 缺失或版本过低时给出提示。
+    // L0：前置校验（网络可达性）。
     crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
-    let missing: Vec<String> = crate::tools::detect_tools("source")
-        .iter()
-        .filter(|t| t.required && (!t.installed || !t.ok))
-        .map(|t| t.id.clone())
-        .collect();
-    if !missing.is_empty() {
-        return Err(crate::i18n::t_fmt("repair.env.missing", &[&missing.join("、")]));
-    }
 
     // L1：清理异常状态。
     logger.info(&crate::i18n::t("log.repair_start"));

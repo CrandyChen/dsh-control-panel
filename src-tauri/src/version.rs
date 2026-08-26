@@ -5,7 +5,6 @@
 
 use serde::Serialize;
 use std::path::Path;
-use std::process::Command;
 
 use crate::error::AppError;
 
@@ -20,80 +19,14 @@ pub struct UpdateCheckResult {
     pub checked_at: String,
 }
 
-/// 在安装目录执行 git 并捕获 stdout（禁止密码交互，避免挂起；隐藏控制台窗口）。
-pub fn run_git_capture(dir: &Path, args: &[String]) -> Result<String, AppError> {
-    let out = crate::process::no_window(
-        Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_TERMINAL_PROMPT", "0"),
-    )
-    .output()
-    .map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::ProgramNotFound("git".into())
-        } else {
-            AppError::Network(e.to_string())
-        }
-    })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(AppError::Network(if stderr.is_empty() {
-            format!("git {} 退出码 {:?}", args.join(" "), out.status.code())
-        } else {
-            stderr
-        }));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn git_args(args: &[&str]) -> Vec<String> {
-    args.iter().map(|s| s.to_string()).collect()
-}
-
-/// 从 `git symbolic-ref refs/remotes/origin/HEAD` 的输出解析分支名。
-pub fn extract_branch_from_symbolic_ref(output: &str) -> Option<String> {
-    let t = output.trim().trim_start_matches("refs/remotes/origin/");
-    if t.is_empty() {
-        None
-    } else {
-        Some(t.to_string())
-    }
-}
-
-/// 解析 `git rev-list --count` 的输出。
-pub fn parse_behind_count(output: &str) -> u64 {
-    output.trim().parse().unwrap_or(0)
-}
-
 /// 读取当前 HEAD commit（短显示需求由前端截断）。
 pub fn read_commit(dir: &Path) -> Option<String> {
-    run_git_capture(dir, &git_args(&["rev-parse", "HEAD"])).ok()
+    crate::gitops::rev_parse(dir, "HEAD").ok()
 }
 
-/// 探测默认远程分支。
+/// 探测默认远程分支（gitops：symbolic-ref，回退 master/main）。
 pub fn default_branch(dir: &Path) -> Result<String, AppError> {
-    if let Ok(out) = run_git_capture(
-        dir,
-        &git_args(&["symbolic-ref", "refs/remotes/origin/HEAD"]),
-    ) {
-        if let Some(b) = extract_branch_from_symbolic_ref(&out) {
-            return Ok(b);
-        }
-    }
-    for candidate in ["master", "main"] {
-        if run_git_capture(
-            dir,
-            &git_args(&["rev-parse", "--verify", &format!("origin/{candidate}")]),
-        )
-        .is_ok()
-        {
-            return Ok(candidate.to_string());
-        }
-    }
-    Err(AppError::Network(
-        "无法确定远程默认分支（origin/HEAD 与 master/main 均不可用）".into(),
-    ))
+    crate::gitops::default_branch(dir)
 }
 
 /// 执行完整检测。`mode` = "prebuilt" 时走 GitHub release 比对（无需 git）；
@@ -111,19 +44,15 @@ pub fn check_for_updates_in_dir(
     }
 }
 
-/// 源码模式：git fetch → 对比本地 HEAD 与 origin 默认分支。
+/// 源码模式：git fetch → 对比本地 HEAD 与 origin 默认分支（基于 gitops/libgit2）。
 fn check_for_updates_git(dir: &Path) -> Result<UpdateCheckResult, AppError> {
-    run_git_capture(dir, &git_args(&["fetch", "origin"]))?;
+    crate::gitops::fetch(dir)?;
     let branch = default_branch(dir)?;
-
-    let local_commit = run_git_capture(dir, &git_args(&["rev-parse", "HEAD"]))?;
+    let local_commit = crate::gitops::rev_parse(dir, "HEAD")?;
     let remote_ref = format!("origin/{branch}");
-    let remote_commit = run_git_capture(dir, &git_args(&["rev-parse", &remote_ref]))?;
-    let behind = parse_behind_count(&run_git_capture(
-        dir,
-        &git_args(&["rev-list", "--count", &format!("HEAD..{remote_ref}")]),
-    )?);
-    let subject = run_git_capture(dir, &git_args(&["log", "-1", "--format=%s", &remote_ref]))?;
+    let remote_commit = crate::gitops::rev_parse(dir, &remote_ref)?;
+    let behind = crate::gitops::behind_count(dir, "HEAD", &remote_ref)?;
+    let subject = crate::gitops::latest_subject(dir, &remote_ref)?;
 
     Ok(UpdateCheckResult {
         update_available: behind > 0,
@@ -181,26 +110,6 @@ fn check_for_updates_prebuilt(current_version: Option<&str>) -> Result<UpdateChe
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn branch_extraction() {
-        assert_eq!(
-            extract_branch_from_symbolic_ref("refs/remotes/origin/master\n"),
-            Some("master".into())
-        );
-        assert_eq!(
-            extract_branch_from_symbolic_ref("refs/remotes/origin/main"),
-            Some("main".into())
-        );
-        assert_eq!(extract_branch_from_symbolic_ref("  \n"), None);
-    }
-
-    #[test]
-    fn behind_count_parsing() {
-        assert_eq!(parse_behind_count("42\n"), 42);
-        assert_eq!(parse_behind_count("0"), 0);
-        assert_eq!(parse_behind_count("abc"), 0);
-    }
 
     #[test]
     fn normalized_tag_version_strips_prefix_and_build_suffix() {

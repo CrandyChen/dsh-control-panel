@@ -6,8 +6,6 @@ use crate::i18n;
 pub enum AppError {
     ProgramNotFound(String),
     StepFailed { step: String, exit_code: i32 },
-    Network(String),
-    /// 仓库主机（默认 github.com）不可达：clone / pull 前预检失败。
     NetworkUnreachable(String),
     NotInstalled,
     AlreadyInstalled(String),
@@ -17,6 +15,8 @@ pub enum AppError {
     NotValidPrebuilt(String),
     /// 预构建内核下载失败（网络 / 资产缺失 / 代理等）。
     PrebuiltDownload(String),
+    /// git(libgit2) 操作失败（clone / fetch / reset 等）。
+    Git(String),
     NotInPreview(String),
     Io(String),
 }
@@ -38,7 +38,6 @@ impl AppError {
             AppError::StepFailed { step, exit_code } => {
                 format!("步骤「{step}」执行失败（退出码 {exit_code}）。请查看下方日志了解详细原因。")
             }
-            AppError::Network(msg) => format!("网络错误：{msg}。请检查网络连接后重试。"),
             AppError::NetworkUnreachable(host) => format!(
                 "网络不可达：无法连接 {host}:443。请检查网络连接、代理或 VPN 设置，确保能访问 GitHub 后重试。"
             ),
@@ -61,6 +60,7 @@ impl AppError {
             AppError::PrebuiltDownload(msg) => {
                 format!("下载预构建内核失败：{msg}。请检查网络、代理或 VPN 设置后重试。")
             }
+            AppError::Git(msg) => format!("Git 操作失败:{msg}。请检查网络后重试。"),
             AppError::NotInPreview(p) => format!("路径不在卸载清单内，已拒绝删除：{p}"),
             AppError::Io(msg) => format!("文件操作失败：{msg}"),
         }
@@ -74,7 +74,6 @@ impl AppError {
             AppError::StepFailed { step, exit_code } => format!(
                 "Step \"{step}\" failed (exit code {exit_code}). See the log below for details."
             ),
-            AppError::Network(msg) => format!("Network error: {msg}. Check your network and retry."),
             AppError::NetworkUnreachable(host) => format!(
                 "Network unreachable: cannot connect to {host}:443. Check your network, proxy or VPN settings so GitHub is accessible, then retry."
             ),
@@ -98,6 +97,7 @@ impl AppError {
             AppError::PrebuiltDownload(msg) => format!(
                 "Failed to download the prebuilt kernel: {msg}. Check your network, proxy or VPN settings and retry."
             ),
+            AppError::Git(msg) => format!("Git operation failed: {msg}. Check your network and retry."),
             AppError::NotInPreview(p) => format!("Path is not in the uninstall list, deletion rejected: {p}"),
             AppError::Io(msg) => format!("File operation failed: {msg}"),
         }

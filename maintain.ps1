@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # ============================================================
 #  maintain.ps1 — DSH Control Panel 项目维护工具（WinForms GUI）
 #
@@ -351,7 +351,7 @@ function Test-VsCpp {
         if ($path) { return New-TestResult 'VS C++ Build Tools' $true ($path.Trim()) $null }
     }
     return New-TestResult 'VS C++ Build Tools' $false $null (
-        "未检测到 Visual Studio C++ Build Tools。`n安装指引：`n  1) 打开 https://visualstudio.microsoft.com/visual-cpp-build-tools/ 下载 Build Tools`n  2) 运行安装器，勾选工作负载「使用 C++ 的桌面开发」(Desktop development with C++)`n  3) 组件保持默认（含 MSVC v143 + Windows SDK），等待安装完成`n  4) 完成后重新运行本工具")
+        "未检测到 Visual Studio C++ Build Tools。`n安装指引：`n  1) 打开 https://visualstudio.microsoft.com/visual-cpp-build-tools/ 下载 Build Tools`n  2) 运行安装器，勾选工作负载「使用 C++ 的桌面开发」(Desktop development with C++)`n  3) 组件保持默认（含 MSVC v143 + Windows SDK），等待安装完成`n  4) 完成后重新运行本工具`n`n说明：Rust 后端通过 git2 内置 libgit2（vendored 编译 C 库），需要 MSVC C++ 工具链。")
 }
 
 function Test-Git {
@@ -770,8 +770,15 @@ $script:ActBuild = {
 
 $script:ActPortable = {
     if (-not (Assert-Env @('node', 'pnpm', 'rust', 'vscpp'))) { return }
+    $light = Confirm-Message '打包便携版' (
+        "请选择打包模式：`n`n· 是(Y) = 轻量 zip（`pnpm portable --no-runtime`，体积小；首次安装时自动下载运行环境）`n· 否(N) = 内置运行时 zip（`pnpm portable`，无需联网但体积大）")
     Set-Busy $true
-    try { $c = Invoke-Pnpm @('portable'); Show-Result '打包便携版' $c }
+    try {
+        $args = if ($light) { @('portable', '--no-runtime') } else { @('portable') }
+        $mode = $(if ($light) { '轻量（--no-runtime）' } else { '内置运行时' })
+        $c = Invoke-Pnpm $args
+        Show-Result ("打包便携版（$mode）") $c
+    }
     finally { Set-Busy $false; Refresh-Status }
 }
 
@@ -1029,6 +1036,9 @@ $script:ActRelease = {
   5) git tag v$new
   6) git push origin v$new
 
+  GitHub Actions 将打包发布**轻量便携版**（pnpm portable --no-runtime，
+  不含 Node.js/pnpm 运行时，首次安装时自动下载；体积更小）。
+
 确认继续？
 "@
     if (-not (Confirm-Message '确认发布新版本？' $msg)) { return }
@@ -1196,7 +1206,7 @@ function Build-Form {
     $btnInstall  = New-MenuButton '安装依赖  (pnpm install)' $script:ActInstall
     $btnDev      = New-MenuButton '本地开发运行  (pnpm tauri dev)' $script:ActDev
     $btnBuild    = New-MenuButton '构建安装程序  (pnpm tauri build)' $script:ActBuild
-    $btnPortable = New-MenuButton '打包便携版 zip  (pnpm portable)' $script:ActPortable
+    $btnPortable = New-MenuButton '打包便携版 zip  (pnpm portable[--no-runtime])' $script:ActPortable
     # 主分支开发
     $btnSyncMain = New-MenuButton '同步主分支  (checkout main + pull)' $script:ActSyncMain
     $btnCommitMain = New-MenuButton '提交代码（当前分支）' $script:ActCommit
@@ -1212,7 +1222,7 @@ function Build-Form {
     $btnGitConfig= New-MenuButton '设置全局 Git 用户名/邮箱' $script:ActGitConfig
     $btnEnv      = New-MenuButton '环境依赖自检' $script:ActEnvCheck
 
-    $pageDev = New-TabPage '本地开发' '安装依赖、运行、构建、打包。执行前会自动检查 Node / pnpm / Rust / VS C++ Build Tools。' @($btnInstall, $btnDev, $btnBuild, $btnPortable)
+    $pageDev = New-TabPage '本地开发' '安装依赖、运行、构建、打包。执行前会自动检查 Node / pnpm / Rust / VS C++ Build Tools；打包时可选择轻量（--no-runtime）或内置运行时。' @($btnInstall, $btnDev, $btnBuild, $btnPortable)
     $pageMain = New-TabPage '主分支开发' '直接在主分支上开发：同步、提交代码（提交基于当前分支，会询问是否推送）、发布新版本。' @($btnSyncMain, $btnCommitMain, $btnRelease)
     $pageBranch = New-TabPage '功能分支开发' '先创建功能分支，开发后提交代码，推送到 GitHub 并提交 PR；合并后回主分支同步并清理本地分支。' @($btnCreateBr, $btnCommitBr, $btnPushBr, $btnSyncMerged, $btnDelBr)
     $pageTool = New-TabPage '工具 / 设置' '克隆项目到本地、设置全局 Git 身份、环境依赖自检。' @($btnClone, $btnGitConfig, $btnEnv)

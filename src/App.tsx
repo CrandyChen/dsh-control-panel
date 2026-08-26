@@ -227,9 +227,7 @@ function Shell({
               display: "flex",
               flexDirection: "column",
               gap: 16,
-              maxWidth: 1200,
               width: "100%",
-              margin: "0 auto",
             }}
           >
             <StatusCard
@@ -238,6 +236,7 @@ function Shell({
               webStatus={l.webStatus}
               lastCheck={l.lastCheck}
               busy={busy}
+              balance={l.balance}
               onOpenSettings={() => setSettingsOpen(true)}
             />
 
@@ -283,9 +282,13 @@ function Shell({
                         ? p.total > 0
                           ? "extract.progress"
                           : "extract.progress.unknown"
-                        : p.total > 0
-                          ? "download.progress"
-                          : "download.progress.unknown";
+                        : p.step === "clone"
+                          ? p.total > 0
+                            ? "clone.progress"
+                            : "clone.progress.unknown"
+                          : p.total > 0
+                            ? "download.progress"
+                            : "download.progress.unknown";
                     return p.total > 0
                       ? t(key, {
                           0: formatSize(p.received),
@@ -296,6 +299,36 @@ function Shell({
                           0: formatSize(p.received),
                         });
                   })()}
+                </Typography.Text>
+              </div>
+            )}
+
+            {/* 运行环境（node/pnpm）下载/解压进度：与内核下载并行时的次要提示 */}
+            {l.runtimeProgress && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <Progress
+                  size="small"
+                  status="active"
+                  percent={
+                    l.runtimeProgress.total > 0
+                      ? Math.min(100, Math.round((l.runtimeProgress.received / l.runtimeProgress.total) * 100))
+                      : undefined
+                  }
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {l.runtimeProgress.step === "runtime-ex"
+                    ? l.runtimeProgress.total > 0
+                      ? t("runtime.extract", {
+                          0: formatSize(l.runtimeProgress.received),
+                          1: formatSize(l.runtimeProgress.total),
+                        })
+                      : t("runtime.extract.unknown", { 0: formatSize(l.runtimeProgress.received) })
+                    : l.runtimeProgress.total > 0
+                      ? t("runtime.progress", {
+                          0: formatSize(l.runtimeProgress.received),
+                          1: formatSize(l.runtimeProgress.total),
+                        })
+                      : t("runtime.progress.unknown", { 0: formatSize(l.runtimeProgress.received) })}
                 </Typography.Text>
               </div>
             )}

@@ -345,13 +345,31 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "🚀 开始更新预构建内核…",
             "🚀 Starting to update the prebuilt kernel…",
         ),
-        "log.prebuilt_download_retry" => (
-            "⚠ 下载失败，自动重试一次：{0}",
-            "⚠ Download failed; retrying once: {0}",
+        "log.prebuilt_download_retry_n" => (
+            "⚠ 下载失败（第 {0} 次），自动重试：{1}",
+            "⚠ Download failed (attempt {0}); retrying: {1}",
         ),
         "log.profile_reconcile" => (
             "🔧 已校准 profile「{0}」的 bundle：移除了内核无法解析的 {1}",
             "🔧 Reconciled bundles of profile \"{0}\": removed {1} that the kernel cannot resolve",
+        ),
+        // ── 运行环境（node/pnpm）下载 ──
+        "log.runtime_start" => (
+            "🚀 开始下载运行环境（Node.js + pnpm）…",
+            "🚀 Starting to download the runtime (Node.js + pnpm)…",
+        ),
+        "log.runtime_done" => (
+            "✅ 运行环境就绪（runtime\\node.exe + pnpm）",
+            "✅ Runtime ready (runtime\\node.exe + pnpm)",
+        ),
+        "runtime.download_failed" => (
+            "运行环境依赖（Node.js / pnpm）下载失败，安装已停止。{0}。请检查网络连接、代理或 VPN 设置后重试。",
+            "Failed to download the runtime dependencies (Node.js / pnpm); installation stopped. {0}. Check your network, proxy or VPN and retry.",
+        ),
+        // ── 余额查询 ──
+        "balance.no_key" => (
+            "未在 ~/.dsh/.credentials.yaml 配置 DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY is not set in ~/.dsh/.credentials.yaml",
         ),
         // ── web 启动快速退出 ──
         "web.quick_exit" => (

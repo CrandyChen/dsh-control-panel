@@ -23,7 +23,7 @@ use crate::error::AppError;
 use crate::process::PipelineEvent;
 
 /// PowerShell 单引号字符串转义（`'` → `''`）。
-fn ps_escape(s: &str) -> String {
+pub(crate) fn ps_escape(s: &str) -> String {
     s.replace('\'', "''")
 }
 
@@ -62,7 +62,7 @@ pub fn clean_ps_error(raw: &str) -> String {
 
 /// 运行 PowerShell 并捕获 stdout；失败返回友好错误。
 /// 所有脚本统一前置 UTF-8 输出编码（修复中文系统下 stderr 乱码）。
-fn powershell_capture(script: &str) -> Result<String, AppError> {
+pub(crate) fn powershell_capture(script: &str) -> Result<String, AppError> {
     let full = format!("{PS_UTF8_PREFIX} {script}");
     let out = crate::process::no_window(
         std::process::Command::new("powershell.exe")
@@ -106,7 +106,23 @@ pub struct ReleaseInfo {
 }
 
 /// 查询最新 release 的 tag、下载地址与资产大小（GitHub REST API，无鉴权）。
+/// GitHub 在国内常抽筋：失败自动重试多次（每次递增等待）。
 pub fn latest_release() -> Result<ReleaseInfo, AppError> {
+    let mut last_err: Option<AppError> = None;
+    for attempt in 0..3u32 {
+        match latest_release_once() {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(1000 * (attempt as u64 + 1)));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| AppError::PrebuiltDownload("查询最新 release 失败".into())))
+}
+
+/// 单次查询（无重试版本）。
+fn latest_release_once() -> Result<ReleaseInfo, AppError> {
     let script = r#"
 $ProgressPreference='SilentlyContinue'
 $h=@{'User-Agent'='DSH-Control-Panel'}
@@ -132,6 +148,20 @@ Write-Output ($r.tag_name + "`n" + $asset.browser_download_url + "`n" + $asset.s
         ));
     }
     Ok(ReleaseInfo { tag, url, size })
+}
+
+/// 通过 HEAD 请求探测资源 Content-Length（用于显示真实进度）；失败返回 None。
+pub fn query_content_length(url: &str) -> Option<u64> {
+    let script = r#"
+$ProgressPreference='SilentlyContinue'
+try {
+  $r=Invoke-WebRequest -Uri '@@URL@@' -Method Head -UseBasicParsing
+  if($r.Headers['Content-Length']){ Write-Output $r.Headers['Content-Length'] }
+} catch { Write-Output '' }
+"#;
+    let script = script.replace("@@URL@@", &ps_escape(url));
+    let out = powershell_capture(&script).ok()?;
+    out.trim().parse::<u64>().ok()
 }
 
 /// 生成下载用的 PowerShell 命令并启动子进程（stdout/stderr 走管道）。
@@ -234,7 +264,12 @@ fn download_attempt(
     result
 }
 
-/// 下载指定 url 到 dest 文件，实时推送进度；失败自动重试一次（瞬时网络抖动）。
+/// 下载最大尝试次数（GitHub 在国内常抽筋，多试几次）。
+const DOWNLOAD_MAX_ATTEMPTS: u32 = 5;
+/// 每次失败后的等待（毫秒），随尝试次数递增。
+const DOWNLOAD_RETRY_DELAY_BASE_MS: u64 = 1200;
+
+/// 下载指定 url 到 dest 文件，实时推送进度；失败自动重试多次（瞬时网络抖动）。
 /// 返回的失败信息已清洗（无命令名前缀 / 乱码）。
 pub fn download_asset(
     url: &str,
@@ -243,22 +278,33 @@ pub fn download_asset(
     channel: &Channel<PipelineEvent>,
     step: &str,
 ) -> Result<(), AppError> {
+    // 未知大小时先探测 Content-Length，用于显示真实进度（探测失败则不显示确定的百分比）。
+    let effective_total = if total == 0 {
+        query_content_length(url).unwrap_or(0)
+    } else {
+        total
+    };
     let mut last_err: Option<AppError> = None;
-    for attempt in 0..2u32 {
-        match download_attempt(url, dest, total, channel, step) {
+    for attempt in 0..DOWNLOAD_MAX_ATTEMPTS {
+        match download_attempt(url, dest, effective_total, channel, step) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 let msg = e.to_string();
                 last_err = Some(e);
-                if attempt == 0 {
-                    // 首次失败：告警并自动重试一次（用户日志显示偶发瞬时失败）。
-                    let note = crate::i18n::t_fmt("log.prebuilt_download_retry", &[&msg]);
+                if attempt + 1 < DOWNLOAD_MAX_ATTEMPTS {
+                    // 告警并继续重试（用户日志显示第几次失败）。
+                    let note = crate::i18n::t_fmt(
+                        "log.prebuilt_download_retry_n",
+                        &[&(attempt + 1).to_string(), &msg],
+                    );
                     let _ = channel.send(PipelineEvent::Output {
                         step: step.into(),
                         stream: "stderr".into(),
                         line: note.clone(),
                     });
-                    std::thread::sleep(std::time::Duration::from_millis(800));
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        DOWNLOAD_RETRY_DELAY_BASE_MS * (attempt as u64 + 1),
+                    ));
                 }
             }
         }
@@ -404,6 +450,13 @@ fn run_extract_with_progress(
             err
         }));
     }
+    // 解压完成：补发一次 100% 进度（快速解压时轮询可能未捕获中间值，避免界面停留在 0%）。
+    let _ = channel.send(PipelineEvent::DownloadProgress {
+        step: step.to_string(),
+        received: total,
+        total,
+        speed_bps: 0,
+    });
     Ok(())
 }
 

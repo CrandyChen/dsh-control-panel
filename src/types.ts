@@ -16,6 +16,10 @@ export interface AppConfig {
   latestSubject: string | null;
   autoCheckEnabled: boolean;
   autoCheckIntervalHours: number;
+  /** 是否启用定时自动检测插件更新（默认 profile）。 */
+  pluginAutoCheckEnabled: boolean;
+  /** 插件自动检测间隔（小时）。 */
+  pluginAutoCheckIntervalHours: number;
   /** 是否使用 `pnpm dsh` 执行 dsh 命令（全局 dsh 不可识别时为 true，启动时自动探测）。 */
   usePnpmDsh: boolean;
   /** 插件管理默认操作的 profile 名称。 */
@@ -89,7 +93,8 @@ export type PipelineEvent =
       received: number;
       total: number;
       speedBps: number;
-    };
+    }
+  | { type: "runtimeDone" };
 
 export type WebStatus = "idle" | "starting" | "ready" | "stopped" | "error";
 
@@ -155,6 +160,16 @@ export interface PluginUpdates {
   entries: PluginUpdateInfo[];
 }
 
+/** 余额查询结果（与 Rust balance.rs 的 BalanceResult 对齐）。 */
+export interface BalanceResult {
+  available: boolean;
+  apiKeySet: boolean;
+  isAvailable: boolean | null;
+  currency: string | null;
+  balance: number | null;
+  error: string | null;
+}
+
 /** 长任务进行中的阶段（驱动按钮禁用与 Steps 展示）。 */
 export type Phase =
   | "idle"
@@ -179,4 +194,10 @@ export function formatSize(bytes: number): string {
     i += 1;
   }
   return `${v.toFixed(1)} ${units[i]}`;
+}
+
+/** 格式化货币金额（CNY 显示 ¥，其余带币种前缀）。 */
+export function formatMoney(value: number, currency: string): string {
+  const sym = currency === "CNY" ? "¥" : `${currency} `;
+  return `${sym}${value.toFixed(2)}`;
 }

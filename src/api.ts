@@ -3,6 +3,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  BalanceResult,
   DetectResult,
   AppConfig,
   LogLine,
@@ -33,6 +34,7 @@ export const api = {
   getDefaultParentDir: () => invoke<string>("default_parent_dir"),
   detectState: () => invoke<DetectResult>("detect_state"),
   detectTools: () => invoke<ToolStatus[]>("detect_tools"),
+  getBalance: () => invoke<BalanceResult>("get_balance"),
   scanManualInstalls: () => invoke<string[]>("scan_manual_installs"),
   adoptInstall: (path: string) => invoke<void>("adopt_install", { path }),
   install: (dir: string, mode: string, onEvent: (e: PipelineEvent) => void) =>

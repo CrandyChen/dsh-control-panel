@@ -19,8 +19,11 @@ import {
   Typography,
 } from "antd";
 import { useI18n } from "../i18n";
+import { api } from "../api";
+import { formatMoney } from "../types";
 import type {
   AppConfig,
+  BalanceResult,
   DetectResult,
   InstallMode,
   UpdateCheckResult,
@@ -33,9 +36,14 @@ interface Props {
   webStatus: WebStatus;
   lastCheck: UpdateCheckResult | null;
   busy: boolean;
+  /** 当前余额（安装 DSH 且配置 API 后每 5 分钟查询）。 */
+  balance: BalanceResult | null;
   /** 打开设置抽屉。 */
   onOpenSettings: () => void;
 }
+
+/** 充值地址（与后端 balance::TOP_UP_URL 一致）。 */
+const TOP_UP_URL = "https://platform.deepseek.com/top_up";
 
 const STATUS_KEYS: Record<WebStatus, string> = {
   idle: "status.running.idle",
@@ -59,6 +67,7 @@ export default function StatusCard({
   webStatus,
   lastCheck,
   busy,
+  balance,
   onOpenSettings,
 }: Props) {
   const { token } = theme.useToken();
@@ -93,9 +102,9 @@ export default function StatusCard({
     >
       <Descriptions
         size="small"
-        column={2}
+        column={{ xs: 1, sm: 2, lg: 3, xl: 3 }}
         colon={false}
-        labelStyle={{ width: 110, color: token.colorTextSecondary }}
+        labelStyle={{ width: 90, color: token.colorTextSecondary }}
         items={[
           {
             key: "installed",
@@ -221,6 +230,36 @@ export default function StatusCard({
                 >
                   {detect?.dshHome ?? "—"}
                 </Typography.Text>
+              </Flex>
+            ),
+          },
+          {
+            key: "balance",
+            label: t("status.balance"),
+            children: (
+              <Flex align="center" gap={8} wrap>
+                {balance?.balance != null ? (
+                  <Typography.Text
+                    strong
+                    style={{
+                      color: balance.balance < 10 ? token.colorError : token.colorText,
+                    }}
+                  >
+                    {formatMoney(balance.balance, balance.currency ?? "CNY")}
+                  </Typography.Text>
+                ) : balance?.apiKeySet === false ? (
+                  <Typography.Text type="secondary">{t("status.balance.none")}</Typography.Text>
+                ) : (
+                  <Typography.Text type="secondary">—</Typography.Text>
+                )}
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0, height: "auto", fontSize: 12 }}
+                  onClick={() => void api.openExternal(TOP_UP_URL)}
+                >
+                  {t("status.balance.topUp")}
+                </Button>
               </Flex>
             ),
           },

@@ -33,8 +33,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build portable zip
-        run: pnpm portable
+      - name: Build portable zip (no bundled runtime)
+        run: pnpm portable --no-runtime
 
       - name: Upload zip artifact
         uses: actions/upload-artifact@v4

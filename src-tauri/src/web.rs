@@ -55,6 +55,9 @@ pub fn start_web(
         return Err(AppError::PortInUse(WEB_PORT).friendly());
     }
 
+    // 运行环境（node/pnpm）就绪，供 dsh web 命令使用（首次会下载）。
+    crate::runtime::ensure_runtime(channel, logger)?;
+
     let step_id = if mode == "source" { "web" } else { "web-prebuilt" };
     let step_title = if mode == "source" {
         crate::i18n::t("step.web")

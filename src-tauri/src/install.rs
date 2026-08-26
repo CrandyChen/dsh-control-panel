@@ -33,7 +33,8 @@ pub fn install(
     }
 }
 
-/// 源码安装：克隆官方仓库 → pnpm install → pnpm run build。
+/// 源码安装：克隆官方仓库（gitops/libgit2）→ pnpm install → pnpm run build。
+/// 运行环境（node/pnpm）在克隆仓库的同时并行下载。
 fn install_from_source(
     app: &AppHandle,
     dir: &str,
@@ -62,15 +63,37 @@ fn install_from_source(
         std::fs::create_dir_all(&parent).map_err(|e| AppError::Io(e.to_string()).friendly())?;
     }
 
+    // 并行下载运行环境（node/pnpm），与仓库克隆互不阻塞。
+    let ch2 = channel.clone();
+    let lg2 = logger.clone();
+    let runtime_task = std::thread::spawn(move || crate::runtime::ensure_runtime(&ch2, &lg2));
+
+    // clone 步骤（gitops/libgit2，带进度）。
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "clone".into(),
+        title: crate::i18n::t("step.clone"),
+    });
+    let clone_result = crate::gitops::clone_with_progress(
+        &crate::config::repo_url(),
+        &target,
+        channel,
+        "clone",
+    )
+    .map_err(|e| e.friendly());
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "clone".into(),
+        exit_code: clone_result.as_ref().map(|_| 0).unwrap_or(-1),
+    });
+    clone_result?;
+
+    // 等待运行环境下载完成（与克隆并行）。
+    match runtime_task.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("运行环境下载线程异常".to_string()),
+    }
+
     let steps = vec![
-        Step {
-            id: "clone",
-            title: "克隆仓库（git clone）",
-            program: "git",
-            args: vec!["clone".into(), config::repo_url(), target_str.clone()],
-            cwd: Some(parent),
-            envs: vec![("GIT_TERMINAL_PROMPT", "0".into())],
-        },
         Step {
             id: "install",
             title: "安装依赖（pnpm install）",
@@ -118,55 +141,73 @@ fn install_prebuilt(
     });
     logger.info(&crate::i18n::t("log.prebuilt_start"));
 
-    let release = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
-    let tmp = std::env::temp_dir().join("dsh-prebuilt.zip");
-    crate::prebuilt::download_asset(&release.url, &tmp, release.size, channel, "download")
-        .map_err(|e| e.friendly())?;
+    // 并行下载运行环境（node/pnpm），与内核下载互不阻塞。
+    let ch2 = channel.clone();
+    let lg2 = logger.clone();
+    let runtime_task = std::thread::spawn(move || crate::runtime::ensure_runtime(&ch2, &lg2));
 
-    let _ = channel.send(PipelineEvent::StepFinished {
-        id: "download".into(),
-        exit_code: 0,
-    });
+    // 内核步骤在闭包内执行：失败也先等运行环境线程结束，避免其继续向界面推送残留进度事件。
+    let kernel_result = (|| -> Result<(), String> {
+        let release = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
+        let tmp = std::env::temp_dir().join("dsh-prebuilt.zip");
+        crate::prebuilt::download_asset(&release.url, &tmp, release.size, channel, "download")
+            .map_err(|e| e.friendly())?;
 
-    let _ = channel.send(PipelineEvent::StepStarted {
-        id: "extract".into(),
-        title: crate::i18n::t("step.extract"),
-    });
-    let dest = config::mode2_install_dir();
-    crate::prebuilt::extract_zip_with_progress(&tmp, &dest, channel, "extract")
-        .map_err(|e| e.friendly())?;
-    let _ = channel.send(PipelineEvent::StepFinished {
-        id: "extract".into(),
-        exit_code: 0,
-    });
+        let _ = channel.send(PipelineEvent::StepFinished {
+            id: "download".into(),
+            exit_code: 0,
+        });
 
-    let root = crate::prebuilt::locate_dsh_root(&dest).map_err(|e| e.friendly())?;
-    // 解压完整性校验：关键入口缺失说明解压不完整，删除损坏目录并报错，
-    // 避免「安装成功但无法启动」。
-    if let Err(e) = crate::prebuilt::verify_prebuilt_root(&root) {
-        let _ = std::fs::remove_dir_all(&dest);
-        return Err(e.friendly());
+        let _ = channel.send(PipelineEvent::StepStarted {
+            id: "extract".into(),
+            title: crate::i18n::t("step.extract"),
+        });
+        let dest = config::mode2_install_dir();
+        crate::prebuilt::extract_zip_with_progress(&tmp, &dest, channel, "extract")
+            .map_err(|e| e.friendly())?;
+        let _ = channel.send(PipelineEvent::StepFinished {
+            id: "extract".into(),
+            exit_code: 0,
+        });
+
+        let root = crate::prebuilt::locate_dsh_root(&dest).map_err(|e| e.friendly())?;
+        // 解压完整性校验：关键入口缺失说明解压不完整，删除损坏目录并报错。
+        if let Err(e) = crate::prebuilt::verify_prebuilt_root(&root) {
+            let _ = std::fs::remove_dir_all(&dest);
+            return Err(e.friendly());
+        }
+        let root_str = root.to_string_lossy().to_string();
+        let version = read_pkg_version(&root).unwrap_or(release.tag.clone());
+
+        // profile bundle 校准：移除其它发行版残留的、当前内核无法解析的 bundle。
+        log_reconcile(&root, logger);
+
+        let mut cfg = config::load_config(app);
+        cfg.install_dir = Some(root_str.clone());
+        cfg.install_mode = "prebuilt".to_string();
+        cfg.installed_version = Some(version);
+        cfg.installed_commit = None;
+        cfg.last_updated_at = Some(config::now_string());
+        cfg.update_available = false;
+        cfg.latest_commit = None;
+        cfg.latest_subject = None;
+        config::save_config(app, &cfg).map_err(|e| e)?;
+
+        let _ = channel.send(PipelineEvent::Finished { ok: true });
+        logger.info(&crate::i18n::t_fmt("log.prebuilt_done", &[&root_str]));
+        Ok(())
+    })();
+
+    // 无论内核成败，都等待运行环境线程结束（避免残留事件干扰界面）。
+    let runtime_err = match runtime_task.join() {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e),
+        Err(_) => Some("运行环境下载线程异常".to_string()),
+    };
+    if let Some(e) = runtime_err {
+        return Err(e);
     }
-    let root_str = root.to_string_lossy().to_string();
-    let version = read_pkg_version(&root).unwrap_or(release.tag.clone());
-
-    // profile bundle 校准：移除其它发行版残留的、当前内核无法解析的 bundle。
-    log_reconcile(&root, logger);
-
-    let mut cfg = config::load_config(app);
-    cfg.install_dir = Some(root_str.clone());
-    cfg.install_mode = "prebuilt".to_string();
-    cfg.installed_version = Some(version);
-    cfg.installed_commit = None;
-    cfg.last_updated_at = Some(config::now_string());
-    cfg.update_available = false;
-    cfg.latest_commit = None;
-    cfg.latest_subject = None;
-    config::save_config(app, &cfg).map_err(|e| e)?;
-
-    let _ = channel.send(PipelineEvent::Finished { ok: true });
-    logger.info(&crate::i18n::t_fmt("log.prebuilt_done", &[&root_str]));
-    Ok(())
+    kernel_result
 }
 
 /// 执行 profile bundle 校准并把移除结果写入日志（供安装/更新/修复共用）。

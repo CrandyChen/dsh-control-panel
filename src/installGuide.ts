@@ -38,8 +38,8 @@ interface GuideStrings {
 
 const zh: GuideStrings = {
   htmlLang: "zh-CN",
-  title: "运行环境安装指引（Git）",
-  sub: "DSH Control Panel 检测到以下运行环境状态。源码安装 DeepSeek Harness 需要 Git；Node.js 与 pnpm 已内置在控制面板中，无需单独安装。",
+  title: "安装说明",
+  sub: "DSH Control Panel 将自动下载运行环境（Node.js 与 pnpm）；Git 已内置，无需额外安装。若下载失败，请检查网络连接、代理或 VPN 后重试。",
   footer:
     "提示：安装完成后，请重新打开控制面板（或点击主界面的「刷新」）重新检测。若仍有问题，可查看「运行日志」了解详细报错。",
   okBadge: (v) => `✓ 已安装（${v}）`,
@@ -62,15 +62,15 @@ const zh: GuideStrings = {
         { label: "winget 安装（推荐）", cmd: "winget install --id Git.Git -e --source winget" },
         { label: "验证安装", cmd: "git --version" },
       ],
-      note: "源码安装与更新 DeepSeek Harness 依赖 Git 拉取代码。",
+      note: "Git 已由控制面板内置，源码安装与更新无需单独安装。",
     },
   },
 };
 
 const en: GuideStrings = {
   htmlLang: "en",
-  title: "Runtime Setup Guide (Git)",
-  sub: "DSH Control Panel detected the following runtime state. Installing DeepSeek Harness from source requires Git; Node.js and pnpm are bundled with the control panel, so no separate install is needed.",
+  title: "Install Notes",
+  sub: "DSH Control Panel downloads the runtime (Node.js and pnpm) automatically; Git is built-in, so no extra install is needed. If the download fails, check your network, proxy or VPN and retry.",
   footer:
     "Tip: after finishing, reopen the control panel (or click \"Refresh\" on the home view) to re-check. If issues persist, see the \"Log\" for details.",
   okBadge: (v) => `✓ Installed (${v})`,
@@ -93,7 +93,7 @@ const en: GuideStrings = {
         { label: "Install via winget (recommended)", cmd: "winget install --id Git.Git -e --source winget" },
         { label: "Verify installation", cmd: "git --version" },
       ],
-      note: "Installing and updating DeepSeek Harness from source relies on Git to fetch code.",
+      note: "Git is built into the control panel, so installing and updating from source needs no separate install.",
     },
   },
 };

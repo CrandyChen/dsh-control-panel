@@ -45,6 +45,8 @@ pub enum PipelineEvent {
         total: u64,
         speed_bps: u64,
     },
+    /// 运行环境（node/pnpm）下载/解压完成：前端据此隐藏运行环境进度条。
+    RuntimeDone,
 }
 
 /// 流水线中的一个步骤。
