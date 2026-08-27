@@ -32,7 +32,7 @@ The install location is fixed to the control panel's own directory: the prebuilt
 Click "Install" and choose an install mode:
 
 - **Prebuilt kernel (default)**: Automatically downloads the latest `deepseek-harness-pkg-windows.zip` from GitHub ([deepseek-harness-pkg](https://github.com/dsh-tauri-desk/deepseek-harness-pkg)).
-- **From official source**: Automatically installs via `git clone` of the official source → `pnpm install` → `pnpm run build` (the parent directory is fixed to the program directory).
+- **From official source**: Automatically installs via `git clone` of the official source → `pnpm install` → `pnpm run build`.
 
 ## Feature Overview
 
@@ -50,18 +50,11 @@ Click "Install" and choose an install mode:
 ### 4. DSH Plugin Management
 - Graphically install / update / uninstall DSH profile plugins (`dsh plugin`); plugins are isolated per profile.
 - Supports npm package names, `github:owner/repo[#version]`, GitHub repo URLs, GitHub tarball URLs, or even a full `dsh plugin` command.
-- Select multiple plugins for a one-click "Update selected" batch update; all plugin operations run in the background without confirmation popups. A live banner at the top shows which plugin is being processed (with N/M progress for batches), and the full log streams to "Execution Details".
-- The update check has built-in network retries and automatic escalating re-checks after failures (seconds to minutes apart, no need to wait for the scheduled cycle); a temporarily failed query shows no error marker and is never mistaken for "up to date".
+- Select multiple plugins for a one-click "Update selected" batch update.
 - Common issues are handled automatically: when pnpm blocks a plugin's build scripts, it is added to the profile's allowBuilds allowlist and the install retried; plugin operations while the web service runs stop the service automatically and restart it after the operation completes.
 
 ### 5. DSH Uninstall
 - Removes DeepSeek Harness; the scope has two selectable items: the **installation directory** and the **DSH user data directory** (~/.dsh — plugins, configuration, credentials, session history, agent presets, etc.).
-
-### 6. Other Tools
-- **Open Terminal**: Opens PowerShell in the parent directory of the installation directory.
-- **Open UI**: Opens the DSH Web UI in the system browser or a new in-app tab (configurable).
-- **Logs**: Daily-rotated log files next to the exe (keeps 5 copies), viewable in real-time within the panel.
-- **Settings**: Scheduled new-version check and its interval, scheduled plugin-update check and its interval, theme, language, etc.
 
 ## Screenshots
 
