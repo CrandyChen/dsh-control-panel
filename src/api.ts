@@ -30,15 +30,12 @@ async function runPipeline<T = void>(
 export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (cfg: AppConfig) => invoke<void>("save_config", { cfg }),
-  pickDirectory: () => invoke<string | null>("pick_directory"),
   getDefaultParentDir: () => invoke<string>("default_parent_dir"),
   detectState: () => invoke<DetectResult>("detect_state"),
   detectTools: () => invoke<ToolStatus[]>("detect_tools"),
   getBalance: () => invoke<BalanceResult>("get_balance"),
-  scanManualInstalls: () => invoke<string[]>("scan_manual_installs"),
-  adoptInstall: (path: string) => invoke<void>("adopt_install", { path }),
-  install: (dir: string, mode: string, onEvent: (e: PipelineEvent) => void) =>
-    runPipeline("install", { dir, mode }, onEvent),
+  install: (mode: string, onEvent: (e: PipelineEvent) => void) =>
+    runPipeline("install", { mode }, onEvent),
   checkForUpdates: () => invoke<UpdateCheckResult>("check_for_updates"),
   update: (onEvent: (e: PipelineEvent) => void) => runPipeline("update", {}, onEvent),
   repairInstall: (onEvent: (e: PipelineEvent) => void) =>
@@ -61,8 +58,8 @@ export const api = {
   pluginCheckUpdates: (profile: string) => invoke<PluginUpdates>("plugin_check_updates", { profile }),
   pluginInstall: (input: string, profile: string, onEvent: (e: PipelineEvent) => void) =>
     runPipeline<PluginOpResult>("plugin_install", { input, profile }, onEvent),
-  pluginUpdate: (spec: string, profile: string, onEvent: (e: PipelineEvent) => void) =>
-    runPipeline<PluginOpResult>("plugin_update", { spec, profile }, onEvent),
+  pluginUpdate: (specs: string[], profile: string, onEvent: (e: PipelineEvent) => void) =>
+    runPipeline<PluginOpResult>("plugin_update", { specs, profile }, onEvent),
   pluginRemove: (specs: string[], profile: string, onEvent: (e: PipelineEvent) => void) =>
     runPipeline<PluginOpResult>("plugin_remove", { specs, profile }, onEvent),
 };

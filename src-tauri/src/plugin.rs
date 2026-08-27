@@ -1120,6 +1120,12 @@ pub fn run_plugin_op(
 
 // ─────────────────────────────── 插件更新检测 ───────────────────────────────
 
+/// npm 最新版查询：重试次数、退避基数与单次超时（对齐 gitops 对 GitHub 的重试策略，
+/// 网络抖动不静默当作「无更新」）。
+const NPM_QUERY_ATTEMPTS: usize = 3;
+const NPM_QUERY_BACKOFF_MS: u64 = 1200;
+const NPM_QUERY_TIMEOUT_SECS: u64 = 20;
+
 /// 单个插件的更新检测结果。
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -1130,10 +1136,13 @@ pub struct PluginUpdateInfo {
     pub current_version: Option<String>,
     /// 最新可用版本（无法获取为 None）。
     pub latest_version: Option<String>,
-    /// 检测到有更新（latest > current）。
+    /// 检测到有更新（latest > current，两者均已知且可比较时才可能为 true）。
     pub update_available: bool,
     /// 来源：npm / github / unknown。
     pub source: String,
+    /// 检测失败原因（网络查询失败 / 已装版本无法读取）。None 表示检测正常完成
+    /// （含确无更新），前端据此把「检测失败」与「已是最新」区分展示。
+    pub error: Option<String>,
 }
 
 /// 指定 profile 的插件更新检测结果。
@@ -1145,7 +1154,8 @@ pub struct PluginUpdates {
     pub entries: Vec<PluginUpdateInfo>,
 }
 
-/// 运行命令并捕获 stdout+stderr（禁终端窗口；带超时，超时/失败返回 None）。
+/// 运行命令并捕获 stdout（stderr 单独读取、不参与结果解析，避免警告文字污染；
+/// 禁终端窗口；带超时，超时/失败/空输出返回 None）。
 fn run_query(programs: &[&str], args: &[String], cwd: &Path, timeout: Duration) -> Option<String> {
     let mut last_err: Option<std::io::Error> = None;
     for prog in programs {
@@ -1166,12 +1176,11 @@ fn run_query(programs: &[&str], args: &[String], cwd: &Path, timeout: Duration) 
                         *o1.lock().unwrap() += &s;
                     });
                 }
+                // stderr 只读不存：其内容（警告 / notice / 错误）不得混入版本解析。
                 if let Some(mut e) = child.stderr.take() {
-                    let o2 = out.clone();
                     std::thread::spawn(move || {
-                        let mut s = String::new();
-                        let _ = e.read_to_string(&mut s);
-                        *o2.lock().unwrap() += &s;
+                        let mut sink = String::new();
+                        let _ = e.read_to_string(&mut sink);
                     });
                 }
                 let deadline = Instant::now() + timeout;
@@ -1312,13 +1321,39 @@ fn version_less(a: &str, b: &str) -> bool {
 }
 
 /// 查询 npm 包的最新版本（`<pkg> view <name> version`），失败返回 None。
+/// 带重试与递增退避（网络抖动 / 代理迟缓时不把失败静默当作「无更新」）。
 fn query_latest_npm(pkg: &str, cwd: &Path) -> Option<String> {
     let args = vec!["view".to_string(), pkg.to_string(), "version".to_string()];
-    let out = run_query(&["pnpm.cmd", "pnpm", "npm.cmd", "npm"], &args, cwd, Duration::from_secs(20))?;
-    out.lines()
+    for attempt in 0..NPM_QUERY_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(NPM_QUERY_BACKOFF_MS * attempt as u64));
+        }
+        if let Some(out) = run_query(
+            &["pnpm.cmd", "pnpm", "npm.cmd", "npm"],
+            &args,
+            cwd,
+            Duration::from_secs(NPM_QUERY_TIMEOUT_SECS),
+        ) {
+            // 仅接受可解析为语义化版本的行；警告等无法解析时视为本次查询失败并重试。
+            if let Some(v) = parse_latest_semver(&out) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// 从命令输出中提取第一个语义化版本行（容忍 `v` 前缀）；无则返回 None。
+pub fn parse_latest_semver(output: &str) -> Option<String> {
+    output
+        .lines()
         .map(|l| l.trim())
-        .find(|l| !l.is_empty() && !l.to_ascii_lowercase().contains("notice"))
-        .map(String::from)
+        .find_map(|l| {
+            if l.is_empty() || l.len() > 64 {
+                return None;
+            }
+            semver::Version::parse(l.trim_start_matches('v')).ok().map(|_| l.to_string())
+        })
 }
 
 /// 查询 GitHub 仓库的最高版本 tag，失败返回 None。
@@ -1328,7 +1363,13 @@ fn query_latest_github_tag(repo: &str, _cwd: &Path) -> Option<String> {
     pick_latest_tag(&tags.join("\n"))
 }
 
-fn make_update_info(key: String, current: Option<String>, latest: Option<String>, source: &str) -> PluginUpdateInfo {
+fn make_update_info(
+    key: String,
+    current: Option<String>,
+    latest: Option<String>,
+    source: &str,
+    error: Option<String>,
+) -> PluginUpdateInfo {
     let update_available = match (&current, &latest) {
         (Some(c), Some(l)) => version_less(c, l),
         _ => false,
@@ -1339,12 +1380,14 @@ fn make_update_info(key: String, current: Option<String>, latest: Option<String>
         latest_version: latest,
         update_available,
         source: source.to_string(),
+        error,
     }
 }
 
 /// 检测指定 profile 已安装第三方插件的更新。
 /// npm 类查询 registry 最新版；github 类查询远程最高版本 tag；其余标记 unknown。
-/// 网络失败 / 超时 / 包不存在：该项 latest 为 None、不标记更新，不中断整体。
+/// 查询彻底失败 / 已装版本无法读取时该项 `error` 置为失败原因（不再静默当作「无更新」），
+/// 不中断整体检测。
 pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUpdates, String> {
     let pdir = profile_dir(profile)?;
     let cwd = Path::new(install_dir);
@@ -1353,12 +1396,28 @@ pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUp
     for e in &list.entries {
         if is_npm_spec(&e.spec) {
             let latest = query_latest_npm(&e.key, cwd);
-            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "npm"));
+            let error = match (&e.version, &latest) {
+                (None, Some(_)) => Some(crate::i18n::t("plugin.updates.current_unknown")),
+                (Some(_), None) => Some(crate::i18n::t("plugin.updates.query_failed")),
+                _ => None,
+            };
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "npm", error));
         } else if let Some(repo) = github_repo_from_spec(&e.spec) {
             let latest = query_latest_github_tag(&repo, cwd);
-            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "github"));
+            let error = match (&e.version, &latest) {
+                (None, Some(_)) => Some(crate::i18n::t("plugin.updates.current_unknown")),
+                (Some(_), None) => Some(crate::i18n::t("plugin.updates.query_failed")),
+                _ => None,
+            };
+            entries.push(make_update_info(
+                e.key.clone(),
+                e.version.clone(),
+                latest,
+                "github",
+                error,
+            ));
         } else {
-            entries.push(make_update_info(e.key.clone(), e.version.clone(), None, "unknown"));
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), None, "unknown", None));
         }
     }
     Ok(PluginUpdates {
@@ -1661,6 +1720,48 @@ mod tests {
         assert!(!version_less("1.3.0", "1.2.3"));
         assert!(!version_less("abc", "1.0.0"));
         assert!(!version_less("1.0.0", "abc"));
+    }
+
+    #[test]
+    fn parse_latest_semver_accepts_only_version_lines() {
+        assert_eq!(parse_latest_semver("1.2.3"), Some("1.2.3".to_string()));
+        assert_eq!(parse_latest_semver("v2.0.0"), Some("v2.0.0".to_string()));
+        assert_eq!(
+            parse_latest_semver("\nnpm notice update available\n\n0.13.7\n"),
+            Some("0.13.7".to_string())
+        );
+        // 警告 / 错误文本不应被当作版本号。
+        assert_eq!(parse_latest_semver("npm ERR! network timeout"), None);
+        assert_eq!(parse_latest_semver(""), None);
+        assert_eq!(parse_latest_semver("not-a-version 1.2"), None);
+    }
+
+    #[test]
+    fn update_info_reports_errors_distinctly() {
+        // 查询失败：error 非空，且不得标记为有更新。
+        let failed = make_update_info(
+            "pkg".into(),
+            Some("1.0.0".into()),
+            None,
+            "npm",
+            Some("查询失败".into()),
+        );
+        assert!(!failed.update_available);
+        assert!(failed.error.is_some());
+        // 已装版本未知同样视为检测异常，而非「已是最新」。
+        let unknown = make_update_info(
+            "pkg".into(),
+            None,
+            Some("2.0.0".into()),
+            "npm",
+            Some("无法读取已安装版本".into()),
+        );
+        assert!(!unknown.update_available);
+        assert!(unknown.error.is_some());
+        // 正常比对无错误。
+        let ok = make_update_info("pkg".into(), Some("1.0.0".into()), Some("1.1.0".into()), "npm", None);
+        assert!(ok.update_available);
+        assert!(ok.error.is_none());
     }
 
     #[test]

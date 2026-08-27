@@ -1,12 +1,13 @@
-// 插件管理对话框：已安装插件列表（可多选卸载）/ 智能输入安装 / 单条更新 / 全部卸载 /
-// 推荐插件链接。命令由后端执行（dsh plugin，自动处理 pnpm dsh 切换与构建拦截重试），
-// 输出流实时展示在「执行详情」，操作完成后自动刷新列表。
-// web 服务运行中：仅允许安装新插件，更新 / 卸载被禁用。
+// 插件管理对话框：已安装插件列表（可多选批量操作）/ 智能输入安装 / 单条与批量更新 /
+// 卸载 / 推荐插件链接。命令由后端直接在后台执行（无确认弹窗，过程实时见「执行详情」，
+// 自动处理 pnpm dsh 切换与构建拦截重试），完成后自动刷新列表。
+// 更新检测内置网络重试：单项查询失败时按退坡间隔自动复查，不展示失败标记、不误报「无更新」。
 
 import {
   AppstoreOutlined,
   CloudSyncOutlined,
   LinkOutlined,
+  LoadingOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -26,7 +27,7 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { AWESOME_PLUGINS_URL } from "../constants";
 import { useI18n } from "../i18n";
@@ -53,13 +54,16 @@ interface Props {
 /** 执行详情保留的最大行数。 */
 const MAX_DETAIL = 300;
 
+/** 更新检测失败后的自动复查间隔（毫秒）：8 秒 → 30 秒 → 2 分钟 → 10 分钟（封顶循环）。 */
+const UPDATE_RETRY_DELAYS_MS = [8_000, 30_000, 120_000, 600_000];
+
 interface DetailLine {
   stream: string;
   line: string;
 }
 
 export default function PluginManagerDialog({ open, config, webRunning, onClose, onSaveSettings }: Props) {
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const { t } = useI18n();
   const [profile, setProfile] = useState(config?.pluginProfile ?? "web");
   /** 本机已存在的 profile 列表（$DSH_HOME/profiles 下的目录），供下拉框选择。 */
@@ -68,6 +72,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  /** 后端实时推送的当前操作行（如「正在更新插件（2/5）：xxx」），优先于 busyLabel 展示。 */
+  const [activityLine, setActivityLine] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [detail, setDetail] = useState<DetailLine[]>([]);
@@ -95,21 +101,60 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     [message, t],
   );
 
-  /** 检测当前 profile 的插件更新（网络查询，结果为最新；失败提示但不清空旧结果）。 */
+  /** 复查定时器与连续失败轮数（手动触发 / 切换 profile / 关闭弹窗时重置）。 */
+  const retryTimer = useRef<number | null>(null);
+  const retryAttempt = useRef(0);
+  const checkUpdatesRef = useRef<((p: string) => Promise<void>) | null>(null);
+
+  const clearRetry = useCallback(() => {
+    if (retryTimer.current !== null) {
+      window.clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+  }, []);
+
+  /** 有失败项时安排一次退坡复查：间隔随连续失败轮数递增，成功后在 checkUpdates 内清零。 */
+  const scheduleRetry = useCallback(
+    (p: string) => {
+      clearRetry();
+      const idx = Math.min(retryAttempt.current, UPDATE_RETRY_DELAYS_MS.length - 1);
+      const ms = UPDATE_RETRY_DELAYS_MS[idx];
+      retryAttempt.current += 1;
+      retryTimer.current = window.setTimeout(() => {
+        retryTimer.current = null;
+        void checkUpdatesRef.current?.(p);
+      }, ms);
+    },
+    [clearRetry],
+  );
+
+  /** 检测当前 profile 的插件更新（网络查询；存在失败项时自动退坡复查，
+   * 失败项不展示「检测失败」标记，也不误报「无更新」）。 */
   const checkUpdates = useCallback(
     async (p: string) => {
+      clearRetry();
       setCheckingUpdates(true);
       try {
         const u = await api.pluginCheckUpdates(p);
         setUpdates(u);
+        if ((u.entries ?? []).some((e) => e.error)) {
+          scheduleRetry(p);
+        } else {
+          retryAttempt.current = 0;
+        }
       } catch (e) {
         message.error(t("plugin.updates.fail", { 0: String(e) }), 5);
+        scheduleRetry(p);
       } finally {
         setCheckingUpdates(false);
       }
     },
-    [message, t],
+    [clearRetry, scheduleRetry, message, t],
   );
+  checkUpdatesRef.current = checkUpdates;
+
+  // 卸载组件 / 关闭弹窗时清理待执行的复查定时器。
+  useEffect(() => clearRetry, [clearRetry]);
 
   // 打开时：同步配置中的 profile 并加载列表，重置操作状态。
   // 仅在打开瞬间读取 config；之后 profile 变更由 saveProfile 自行保存并刷新。
@@ -121,6 +166,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       setDetailOpen(false);
       setInput("");
       setUpdates(null);
+      clearRetry();
+      retryAttempt.current = 0;
       void loadList(config?.pluginProfile || "web");
       void checkUpdates(config?.pluginProfile || "web");
       // 拉取本机已有 profile 供下拉框选择（失败时回退为仅当前 profile）。
@@ -132,25 +179,29 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  /** 后端管道事件：收集输出行到执行详情。 */
+  /** 后端管道事件：收集输出行到执行详情；item-* 步骤事件为实时进度标题，顶部展示。 */
   const onEvent = useCallback((e: PipelineEvent) => {
     if (e.type === "output") {
       setDetail((prev) => {
         const next = [...prev, { stream: e.stream, line: e.line }];
         return next.length > MAX_DETAIL ? next.slice(next.length - MAX_DETAIL) : next;
       });
+    } else if (e.type === "stepStarted" && e.id.startsWith("item-")) {
+      setActivityLine(e.title);
     }
   }, []);
 
-  /** 通用操作包装：置忙 → （若 web 运行则先自动停止）→ 执行 → 结果提示 → 成功后清空输入并刷新列表，
-   * 结束后（无论成败）若之前运行则自动重新启动 web。返回执行结果（失败为 null）。 */
+  /** 通用操作包装：置忙 → 自动展开「执行详情」（可随时收起）→（若 web 运行则先自动停止）→
+   * 执行 → 结果提示 → 成功后清空输入并刷新列表，结束后（无论成败）若之前运行则自动重新启动 web。
+   * 返回执行结果（失败为 null）。 */
   const runOp = useCallback(
     async (label: string, run: () => Promise<PluginOpResult>): Promise<PluginOpResult | null> => {
       setBusy(true);
       setBusyLabel(label);
+      setActivityLine(null);
       setResult(null);
       setDetail([]);
-      setDetailOpen(false);
+      setDetailOpen(true);
       const wasRunning = webRunning;
       try {
         if (wasRunning) {
@@ -174,107 +225,55 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         }
         setBusy(false);
         setBusyLabel(null);
+        setActivityLine(null);
       }
     },
     [loadList, profile, webRunning],
   );
 
-  /** 智能安装：输入由后端解析（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。 */
+  /** 智能安装：输入由后端解析（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。
+   * busyLabel 带上输入内容，顶部显示「正在安装插件：<输入>」。 */
   const install = useCallback(() => {
     const value = input.trim();
     if (!value) {
       message.warning(t("plugin.install.warn"));
       return;
     }
-    void runOp(t("plugin.op.install"), () => api.pluginInstall(value, profile, onEvent));
+    void runOp(t("plugin.install.named", { 0: value }), () =>
+      api.pluginInstall(value, profile, onEvent),
+    );
   }, [input, profile, onEvent, runOp, message, t]);
 
+  /** 更新单个插件：直接后台执行，过程见「执行详情」。 */
   const updateOne = useCallback(
     (entry: PluginEntry) => {
-      modal.confirm({
-        title: t("plugin.update.confirm.title", { 0: entry.key }),
-        content: (
-          <div style={{ fontSize: 13 }}>
-            {t("plugin.update.confirm.exec", { 0: profile, 1: entry.key })}
-            <br />
-            {t("plugin.update.confirm.note")}
-          </div>
-        ),
-        okText: t("plugin.update"),
-        cancelText: t("common.cancel"),
-        onOk: () =>
-          runOp(
-            t("plugin.update.confirm.title", { 0: entry.key }),
-            () => api.pluginUpdate(entry.key, profile, onEvent),
-          ),
-      });
+      void runOp(t("plugin.op.update"), () => api.pluginUpdate([entry.key], profile, onEvent));
     },
-    [modal, profile, runOp, onEvent, t],
+    [profile, runOp, onEvent, t],
   );
+
+  /** 批量更新所选插件：逐个在后台执行，全程仅一次服务启停封装。 */
+  const updateSelected = useCallback(() => {
+    const keys = selectedKeys.map(String);
+    if (keys.length === 0) return;
+    void runOp(
+      t("plugin.updateSelected.n", { 0: keys.length }),
+      () => api.pluginUpdate(keys, profile, onEvent),
+    );
+  }, [selectedKeys, profile, runOp, onEvent, t]);
 
   const removeOne = useCallback(
     (entry: PluginEntry) => {
-      modal.confirm({
-        title: t("plugin.remove.confirm.title", { 0: entry.key }),
-        content: (
-          <div style={{ fontSize: 13 }}>
-            {t("plugin.remove.confirm.desc", { 0: profile, 1: entry.key })}
-          </div>
-        ),
-        okText: t("plugin.remove"),
-        okButtonProps: { danger: true },
-        cancelText: t("common.cancel"),
-        onOk: () =>
-          runOp(
-            t("plugin.remove.confirm.title", { 0: entry.key }),
-            () => api.pluginRemove([entry.key], profile, onEvent),
-          ),
-      });
+      void runOp(t("plugin.op.remove"), () => api.pluginRemove([entry.key], profile, onEvent));
     },
-    [modal, profile, runOp, onEvent, t],
+    [profile, runOp, onEvent, t],
   );
 
   const removeSelected = useCallback(() => {
-    if (selectedKeys.length === 0) return;
     const keys = selectedKeys.map(String);
-    modal.confirm({
-      title: t("plugin.remove.selected.title", { 0: keys.length }),
-      content: (
-        <div style={{ fontSize: 13 }}>
-          {t("plugin.remove.confirm.desc", { 0: profile, 1: keys.join(" ") })}
-        </div>
-      ),
-      okText: t("plugin.remove"),
-      okButtonProps: { danger: true },
-      cancelText: t("common.cancel"),
-      onOk: () =>
-        runOp(t("plugin.op.remove"), () => api.pluginRemove(keys, profile, onEvent)),
-    });
-  }, [selectedKeys, modal, profile, runOp, onEvent, t]);
-
-  const removeAll = useCallback(() => {
-    const keys = (list?.entries ?? []).map((e) => e.key);
-    if (keys.length === 0) {
-      message.info(t("plugin.remove.none"));
-      return;
-    }
-    modal.confirm({
-      title: t("plugin.remove.all.title"),
-      content: (
-        <div style={{ fontSize: 13 }}>
-          {t("plugin.remove.all.desc1", { 0: keys.length })}
-          <br />
-          {t("plugin.remove.confirm.desc", { 0: profile, 1: keys.join(" ") })}
-          <br />
-          {t("plugin.remove.all.desc2")}
-        </div>
-      ),
-      okText: t("plugin.remove.all.btn"),
-      okButtonProps: { danger: true },
-      cancelText: t("common.cancel"),
-      onOk: () => runOp(t("plugin.removeAll"), () => api.pluginRemove(keys, profile, onEvent)),
-    });
-  }, [list, modal, profile, runOp, onEvent, message, t]);
+    if (keys.length === 0) return;
+    void runOp(t("plugin.op.remove"), () => api.pluginRemove(keys, profile, onEvent));
+  }, [selectedKeys, profile, runOp, onEvent, t]);
 
   /** 修改 profile：立即保存到配置并刷新列表（不同 profile 互相隔离）。 */
   const saveProfile = useCallback(
@@ -282,11 +281,13 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       const v = p.trim() || "web";
       setProfile(v);
       setUpdates(null);
+      clearRetry();
+      retryAttempt.current = 0;
       void onSaveSettings({ pluginProfile: v });
       void loadList(v);
       void checkUpdates(v);
     },
-    [onSaveSettings, loadList, checkUpdates],
+    [onSaveSettings, loadList, checkUpdates, clearRetry],
   );
 
   /** 推荐插件列表：GitHub 禁止内嵌 iframe，在系统浏览器打开。 */
@@ -434,8 +435,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         {busy && (
           <Alert
             type="info"
-            showIcon
-            message={t("plugin.busy.msg", { 0: busyLabel ?? "…" })}
+            icon={<LoadingOutlined spin />}
+            message={activityLine ?? t("plugin.busy.msg", { 0: busyLabel ?? "…" })}
             description={t("plugin.busy.desc")}
           />
         )}
@@ -523,7 +524,10 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
               size="small"
               icon={<CloudSyncOutlined />}
               disabled={busy || checkingUpdates}
-              onClick={() => void checkUpdates(profile)}
+              onClick={() => {
+                retryAttempt.current = 0;
+                void checkUpdates(profile);
+              }}
             >
               {t("plugin.checkUpdates")}
             </Button>
@@ -556,9 +560,18 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           />
         )}
 
-        {/* 卸载操作 */}
+        {/* 批量操作：更新所选 / 卸载所选 */}
         <Flex justify="space-between" gap={8} wrap>
           <Space>
+            <Button
+              icon={<CloudSyncOutlined />}
+              disabled={busy || selectedKeys.length === 0}
+              onClick={updateSelected}
+            >
+              {selectedKeys.length > 0
+                ? t("plugin.updateSelected.n", { 0: selectedKeys.length })
+                : t("plugin.updateSelected")}
+            </Button>
             <Button
               danger
               disabled={busy || selectedKeys.length === 0}
@@ -567,9 +580,6 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
               {selectedKeys.length > 0
                 ? t("plugin.removeSelected", { 0: selectedKeys.length })
                 : t("plugin.removeSelectedNone")}
-            </Button>
-            <Button danger type="text" disabled={busy} onClick={removeAll}>
-              {t("plugin.removeAll")}
             </Button>
           </Space>
           <Button icon={<ReloadOutlined />} disabled={busy} onClick={() => void loadList(profile)}>

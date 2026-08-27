@@ -40,7 +40,7 @@ pub fn mode2_install_dir() -> PathBuf {
     exe_dir().join(MODE2_DIR)
 }
 
-/// 源码安装（模式一）父目录默认值：程序运行目录（用户可修改）。
+/// 源码安装（模式一）父目录：固定为程序运行目录（exe 所在目录）。
 pub fn mode1_default_parent() -> PathBuf {
     exe_dir()
 }

@@ -54,12 +54,11 @@ export interface Panel {
   /** 内嵌浏览器 Tab（纯前端状态）；activeTabId 为 null 时显示控制面板主界面。 */
   tabs: BrowserTab[];
   activeTabId: string | null;
-  manualCandidates: string[] | null;
   logDir: string;
   refresh: () => Promise<void>;
   /** 重新检测运行环境工具（仅源码模式 Git；预构建模式返回空）并更新 tools 状态。 */
   refreshTools: () => Promise<ToolStatus[]>;
-  install: (dir: string, mode: string) => Promise<void>;
+  install: (mode: string) => Promise<void>;
   /** 检测新版本：返回结果（失败为 null），由调用方决定是否展示更新详情对话框。 */
   checkForUpdates: () => Promise<UpdateCheckResult | null>;
   update: () => Promise<void>;
@@ -82,8 +81,6 @@ export interface Panel {
   closeTab: (id: string) => void;
   focusTab: (id: string) => void;
   showHome: () => void;
-  adoptInstall: (path: string) => Promise<void>;
-  ignoreManualInstall: () => void;
   saveSettings: (patch: Partial<AppConfig>) => Promise<void>;
   clearLogs: () => Promise<void>;
   appendLog: (level: string, text: string) => void;
@@ -124,13 +121,10 @@ export function usePanel(): Panel {
   const [balance, setBalance] = useState<BalanceResult | null>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [manualCandidates, setManualCandidates] = useState<string[] | null>(null);
   /** 最近一次插件更新检测结果（默认为当前插件 profile；周期/手动触发更新）。 */
   const [pluginUpdates, setPluginUpdates] = useState<PluginUpdates | null>(null);
   const [logDir, setLogDir] = useState("");
 
-  const manualIgnored = useRef(false);
-  const manualScanned = useRef(false);
   const startedByUs = useRef(false);
   /** 启动失败后是否已提示过修复安装（每会话一次，避免打扰）。 */
   const repairSuggested = useRef(false);
@@ -157,14 +151,6 @@ export function usePanel(): Panel {
       setDetect(det);
       // 启动流程进行中（starting）时不要覆盖状态，避免按钮提前恢复。
       setWebStatus((prev) => (prev === "starting" ? prev : det.running ? "ready" : "idle"));
-      // 未配置安装目录时，扫描一次本机手动安装的 DeepSeek Harness（不重复扫描）。
-      if (!cfg.installDir && !manualIgnored.current && !manualScanned.current) {
-        manualScanned.current = true;
-        const found = await api.scanManualInstalls();
-        if (found.length > 0) {
-          setManualCandidates(found);
-        }
-      }
     } catch (e) {
       message.error(t("msg.refreshFail", { 0: String(e) }));
     }
@@ -382,8 +368,8 @@ export function usePanel(): Panel {
   }, [detect?.installed, checkBalance]);
 
   const install = useCallback(
-    (dir: string, mode: string) =>
-      withPhase("installing", () => api.install(dir, mode, onPipelineEvent), t("msg.installDone")),
+    (mode: string) =>
+      withPhase("installing", () => api.install(mode, onPipelineEvent), t("msg.installDone")),
     [onPipelineEvent, withPhase, t],
   );
 
@@ -554,35 +540,7 @@ export function usePanel(): Panel {
     setActiveTabId(null);
   }, []);
 
-  /** 采用手动安装的 DSH 目录，随后尝试检测一次更新（失败静默）。 */
-  const adoptInstall = useCallback(
-    async (path: string) => {
-      try {
-        await api.adoptInstall(path);
-        setManualCandidates(null);
-        message.success(t("msg.adoptDone", { 0: path }));
-        await refresh();
-        try {
-          const r = await api.checkForUpdates();
-          setLastCheck(r);
-          if (r.updateAvailable) {
-            message.warning(t("msg.newVersionShort", { 0: r.behind }), 5);
-          }
-        } catch {
-          message.info(t("msg.checkFail"), 4);
-        }
-      } catch (e) {
-        message.error(String(e));
-      }
-    },
-    [message, refresh, t],
-  );
-
-  const ignoreManualInstall = useCallback(() => {
-    manualIgnored.current = true;
-    setManualCandidates(null);
-  }, []);
-
+  /** 保存设置（合并 patch 后写配置并同步界面）。 */
   const saveSettings = useCallback(
     async (patch: Partial<AppConfig>) => {
       if (!config) return;
@@ -634,7 +592,6 @@ export function usePanel(): Panel {
     checkBalance,
     tabs,
     activeTabId,
-    manualCandidates,
     logDir,
     refresh,
     refreshTools,
@@ -656,8 +613,6 @@ export function usePanel(): Panel {
     closeTab,
     focusTab,
     showHome,
-    adoptInstall,
-    ignoreManualInstall,
     saveSettings,
     clearLogs,
     appendLog,

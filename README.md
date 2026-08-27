@@ -28,10 +28,12 @@ DSH Control Panel 把 DeepSeek Harness 常用的**安装**、**更新**、**卸�
 
 ## 安装 DeepSeek Harness（两种模式）
 
+安装位置固定为控制面板程序所在目录：预构建内核解压到 `dsh` 子目录，源码安装克隆到 `deepseek-harness` 子目录。程序启动时只检测本目录下的 DSH 安装情况，发现已有安装会自动关联。
+
 点击「安装」后选择安装方式：
 
 - **预构建内核（默认）**：自动从 GitHub（[deepseek-harness-pkg](https://github.com/dsh-tauri-desk/deepseek-harness-pkg)）下载最新 `deepseek-harness-pkg-windows.zip`。
-- **从源码安装**：自动通过 `git clone`官方源码 → `pnpm install` → `pnpm run build`的方式安装。
+- **从源码安装**：自动通过 `git clone`官方源码 → `pnpm install` → `pnpm run build`的方式安装（父目录固定为程序运行目录）。
 
 
 ## 功能总览
@@ -50,13 +52,15 @@ DSH Control Panel 把 DeepSeek Harness 常用的**安装**、**更新**、**卸�
 ### 4. DSH 插件管理
 - 图形化安装 / 更新 / 卸载 DSH profile 插件（`dsh plugin`），插件按 profile 互相隔离。
 - 支持 npm 包名、`github:owner/repo[#版本]`、GitHub 仓库链接、GitHub 压缩包链接，以及完整的 `dsh plugin` 命令。
+- 支持勾选多个插件「更新所选」批量更新；所有插件操作均无确认弹窗、直接后台执行，顶部实时显示当前处理的插件（批量含 N/M 进度），完整过程在「执行详情」实时展示。
+- 更新检测内置网络重试与自动退坡复查（失败后隔数秒至数分钟自动重查，无需等待定时周期），检测暂时失败不显示错误标记，也不会误报「无更新」。
 - 常见问题自动处理：pnpm 拦截插件构建脚本时自动加入 profile 的 allowBuilds 白名单并重试；web 服务运行中的插件操作会**自动停止服务**，操作完成后**自动重启服务**。
 
 ### 5. DSH 卸载
 - 移除 DeepSeek Harness，范围共两项，可选：「安装目录」与「DSH 用户数据目录」（~/.dsh，个人数据：插件、配置、凭据、会话记录、Agent 预设等）。
 
 ### 6. 其他工具
-- **打开终端**：在安装目录打开 PowerShell。
+- **打开终端**：在安装目录的父目录打开 PowerShell。
 - **打开界面**：在系统浏览器或程序内新标签页打开 DSH Web 界面（可配置）。
 - **日志**：exe 同目录按天轮转的日志文件（保留 5 份），面板内实时查看。
 - **设置**：定时检测新版本及间隔、定时检测插件更新及间隔、主题、语言等。

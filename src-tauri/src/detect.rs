@@ -137,98 +137,39 @@ pub fn detect_state(dir: Option<&str>, mode: &str) -> DetectResult {
     }
 }
 
-/// 手动安装的常见目录名（git 克隆；GitHub zip 解压无 .git，无法更新，不在检测范围）。
-pub const MANUAL_INSTALL_DIR_NAMES: &[&str] = &[
-    "deepseek-harness",
-    "dsh",
-    "deepseek-harness-main",
-    "deepseek-harness-master",
-];
-
-/// 常见开发子目录名（用于盘符根与用户目录下的候选根）。
-const DEV_SUBDIRS: &[&str] = &[
-    "dev",
-    "tools",
-    "projects",
-    "code",
-    "source",
-    "git",
-    "repos",
-    "workspace",
-];
-
-/// 候选根目录：所有存在的盘符根（含其下常见开发目录） + 用户目录及其常见子目录。
-pub fn candidate_roots() -> Vec<std::path::PathBuf> {
-    let mut roots = Vec::new();
-    for d in b'a'..=b'z' {
-        let root = std::path::PathBuf::from(format!("{}:\\", d as char));
-        if !root.is_dir() {
-            continue;
-        }
-        roots.push(root.clone());
-        for sub in DEV_SUBDIRS {
-            let p = root.join(sub);
-            if p.is_dir() {
-                roots.push(p);
-            }
-        }
-        // 盘符根下 dev 的更深一层（如 D:\dev\tools\deepseek-harness）。
-        for sub in DEV_SUBDIRS {
-            let p = root.join("dev").join(sub);
-            if p.is_dir() {
-                roots.push(p);
-            }
-        }
+/// 仅检测程序运行目录（exe 所在目录）下的 DSH 安装情况：
+/// 预构建内核位于 `dsh` 子目录、源码安装位于 `deepseek-harness` 子目录。
+/// 两者同时存在时优先预构建（默认安装方式）。返回 `(安装目录, 安装方式)`。
+pub fn detect_local_default() -> Option<(String, &'static str)> {
+    let prebuilt = crate::config::mode2_install_dir();
+    if is_valid_prebuilt(&prebuilt) {
+        return Some((prebuilt.to_string_lossy().to_string(), "prebuilt"));
     }
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let home = std::path::PathBuf::from(&home);
-        roots.push(home.clone());
-        for sub in DEV_SUBDIRS {
-            let p = home.join(sub);
-            if p.is_dir() {
-                roots.push(p);
-            }
-        }
-        let desktop = home.join("Desktop");
-        if desktop.is_dir() {
-            roots.push(desktop);
-        }
+    let repo = crate::config::exe_dir().join(crate::config::repo_dir_name());
+    if is_valid_repo(&repo) {
+        return Some((repo.to_string_lossy().to_string(), "source"));
     }
-    roots
+    None
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
-    let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
-    let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
-    ca == cb
-}
-
-/// 在给定根集合下扫描可能手动安装的 DeepSeek Harness（roots 可注入，便于测试）。
-pub fn scan_with_roots(roots: &[std::path::PathBuf], exclude: Option<&str>) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
-    for root in roots {
-        for name in MANUAL_INSTALL_DIR_NAMES {
-            let p = root.join(name);
-            if !is_valid_repo(&p) {
-                continue;
-            }
-            let s = p.to_string_lossy().to_string();
-            if let Some(ex) = exclude {
-                if !ex.trim().is_empty() && same_path(&p, Path::new(ex)) {
-                    continue;
-                }
-            }
-            if !found.contains(&s) {
-                found.push(s);
-            }
-        }
+/// 无安装记录时自动采用程序运行目录下的既有安装，写入配置（幂等：仅在发生变更时保存）。
+pub fn ensure_local_install(cfg: &mut crate::config::AppConfig) -> bool {
+    if cfg
+        .install_dir
+        .as_deref()
+        .map(|d| !d.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return false;
     }
-    found
-}
-
-/// 扫描本机可能手动安装的 DeepSeek Harness，返回有效仓库路径列表。
-pub fn scan_manual_installs(exclude: Option<&str>) -> Vec<String> {
-    scan_with_roots(&candidate_roots(), exclude)
+    match detect_local_default() {
+        Some((dir, mode)) => {
+            cfg.install_dir = Some(dir);
+            cfg.install_mode = mode.to_string();
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -298,46 +239,51 @@ mod tests {
     }
 
     #[test]
-    fn scan_finds_repo_in_roots_and_respects_exclude() {
-        let base = std::env::temp_dir().join(format!("dsh-scan-{}", std::process::id()));
-        let repo = base.join("deepseek-harness");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::write(
-            repo.join("package.json"),
-            r#"{"name":"@deepseek-ai/dsh-root","version":"0.1.0-rc.5"}"#,
-        )
-        .unwrap();
-        // 非仓库目录不应命中
-        std::fs::create_dir_all(base.join("dsh")).unwrap();
+    fn local_default_detects_prebuilt_and_source_dirs() {
+        use crate::config::{exe_dir, mode2_install_dir, repo_dir_name};
+        // 预构建内核目录：node_modules/.bin/dsh.cmd 存在即有效。
+        let prebuilt = mode2_install_dir();
+        let had_prebuilt = is_valid_prebuilt(&prebuilt);
+        if !had_prebuilt {
+            std::fs::create_dir_all(prebuilt.join("node_modules/.bin")).unwrap();
+            std::fs::write(prebuilt.join("node_modules/.bin/dsh.cmd"), "@echo off").unwrap();
+        }
+        let found = detect_local_default().expect("应检出同目录预构建安装");
+        assert_eq!(found.0, prebuilt.to_string_lossy().to_string());
+        assert_eq!(found.1, "prebuilt");
+        if !had_prebuilt {
+            std::fs::remove_dir_all(&prebuilt).unwrap();
+        }
 
-        let roots = vec![base.clone()];
-        let found = scan_with_roots(&roots, None);
-        assert_eq!(found.len(), 1);
-        assert!(same_path(Path::new(&found[0]), &repo));
-
-        let excluded = scan_with_roots(&roots, Some(repo.to_string_lossy().as_ref()));
-        assert!(excluded.is_empty());
-
-        std::fs::remove_dir_all(&base).unwrap();
+        // 源码仓库目录：无预构建时才轮到它。
+        let repo = exe_dir().join(repo_dir_name());
+        let had_repo = is_valid_repo(&repo);
+        if !had_repo && is_valid_prebuilt(&prebuilt) {
+            // 环境里已有真实预构建目录时无法安全模拟（会先命中预构建），跳过该分支。
+            return;
+        }
+        if !had_repo {
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::write(
+                repo.join("package.json"),
+                r#"{"name":"@deepseek-ai/dsh-root","version":"0.1.0-rc.5"}"#,
+            )
+            .unwrap();
+        }
+        let found = detect_local_default().expect("应检出同目录源码安装");
+        assert_eq!(found.0, repo.to_string_lossy().to_string());
+        assert_eq!(found.1, "source");
+        if !had_repo {
+            std::fs::remove_dir_all(&repo).unwrap();
+        }
     }
 
     #[test]
-    fn scan_finds_nested_repo_dev_tools_pattern() {
-        // 模拟 D:\dev\tools\deepseek-harness 结构。
-        let base = std::env::temp_dir().join(format!("dsh-scan-nested-{}", std::process::id()));
-        let repo = base.join("dev/tools/deepseek-harness");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::write(
-            repo.join("package.json"),
-            r#"{"name":"@deepseek-ai/dsh-root","version":"0.1.0-rc.5"}"#,
-        )
-        .unwrap();
-
-        let roots = vec![base.join("dev/tools")];
-        let found = scan_with_roots(&roots, None);
-        assert_eq!(found.len(), 1);
-        assert!(same_path(Path::new(&found[0]), &repo));
-
-        std::fs::remove_dir_all(&base).unwrap();
+    fn ensure_local_install_only_writes_when_missing() {
+        // 已有安装记录时不覆盖。
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.install_dir = Some("C:\\somewhere\\deepseek-harness".to_string());
+        assert!(!ensure_local_install(&mut cfg));
+        assert_eq!(cfg.install_dir.as_deref(), Some("C:\\somewhere\\deepseek-harness"));
     }
 }

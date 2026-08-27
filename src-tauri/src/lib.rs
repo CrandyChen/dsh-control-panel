@@ -68,23 +68,7 @@ fn save_config(app: AppHandle, cfg: AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn pick_directory(app: AppHandle) -> Option<String> {
-    use tauri_plugin_dialog::DialogExt;
-    let logger = app.state::<AppState>().logger.clone();
-    let picked = app
-        .dialog()
-        .file()
-        .blocking_pick_folder()
-        .and_then(|f| f.into_path().ok())
-        .map(|p| p.to_string_lossy().to_string());
-    if let Some(p) = &picked {
-        logger.info(&crate::i18n::t_fmt("log.picked_dir", &[p]));
-    }
-    picked
-}
-
-/// 源码安装模式的默认父目录（程序运行目录），供前端安装弹窗预填。
+/// 源码安装模式的默认父目录（程序运行目录），供前端安装弹窗展示目标路径。
 #[tauri::command]
 fn default_parent_dir() -> String {
     config::mode1_default_parent().to_string_lossy().to_string()
@@ -164,65 +148,15 @@ async fn get_balance() -> balance::BalanceResult {
         })
 }
 
-/// 扫描本机可能手动安装的 DeepSeek Harness。
-#[tauri::command]
-async fn scan_manual_installs(app: AppHandle) -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let logger = app.state::<AppState>().logger.clone();
-        let cfg = config::load_config(&app);
-        let found = detect::scan_manual_installs(cfg.install_dir.as_deref());
-        logger.info(&crate::i18n::t_fmt("log.manual_scan_found", &[&found.len().to_string()]));
-        for p in &found {
-            logger.info(&crate::i18n::t_fmt("log.manual_scan_item", &[p]));
-        }
-        found
-    })
-    .await
-    .unwrap_or_default()
-}
-
-/// 采用手动安装的 DeepSeek Harness：将安装目录/版本/commit 写入控制面板配置。
-#[tauri::command]
-async fn adopt_install(app: AppHandle, path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let logger = app.state::<AppState>().logger.clone();
-        let p = PathBuf::from(&path);
-        if !detect::is_valid_repo(&p) {
-            return Err(error::AppError::NotValidInstall(path).friendly());
-        }
-        let version = detect::read_version(&p);
-        let commit = version::read_commit(&p);
-        let mut cfg = config::load_config(&app);
-        cfg.install_dir = Some(path.clone());
-        cfg.install_mode = "source".to_string();
-        cfg.installed_version = version;
-        cfg.installed_commit = commit;
-        cfg.last_check_at = Some(config::now_string());
-        config::save_config(&app, &cfg)?;
-        logger.info(&crate::i18n::t_fmt(
-            "log.adopt_done",
-            &[
-                &path,
-                cfg.installed_version.as_deref().unwrap_or("—"),
-                cfg.installed_commit.as_deref().unwrap_or("—"),
-            ],
-        ));
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 #[tauri::command]
 async fn install(
     app: AppHandle,
-    dir: String,
     mode: String,
     channel: Channel<PipelineEvent>,
 ) -> Result<(), String> {
     let logger = app.state::<AppState>().logger.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        install::install(&app, &dir, &mode, &channel, &logger)
+        install::install(&app, &mode, &channel, &logger)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -356,8 +290,16 @@ fn open_terminal(app: AppHandle) -> Result<(), String> {
         .install_dir
         .clone()
         .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
-    terminal::open_terminal(&dir)?;
-    logger.info(&crate::i18n::t_fmt("log.open_terminal", &[&dir]));
+    // 打开安装目录的父目录（便于直接查看 / 操作 dsh、deepseek-harness 等同级内容）；
+    // 父目录不存在时回退为安装目录本身。
+    let target = std::path::Path::new(&dir)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| std::path::PathBuf::from(&dir));
+    let target_str = target.to_string_lossy().to_string();
+    terminal::open_terminal(&target_str)?;
+    logger.info(&crate::i18n::t_fmt("log.open_terminal", &[&target_str]));
     Ok(())
 }
 
@@ -455,34 +397,75 @@ async fn plugin_install(
     .map_err(|e| e.to_string())?
 }
 
-/// 更新指定插件（spec 为列表中的依赖 key，github 标识需与安装时完全一致）。
+/// 更新指定插件（specs 为列表中的依赖 key，github 标识需与安装时完全一致；支持批量）。
+/// 多个 key 时逐个执行 `dsh plugin update`（全程只有一次 web 服务的启停封装），
+/// 结果逐条聚合返回。
 #[tauri::command]
 async fn plugin_update(
     app: AppHandle,
-    spec: String,
+    specs: Vec<String>,
     profile: String,
     channel: Channel<PipelineEvent>,
 ) -> Result<plugin::PluginOpResult, String> {
     let logger = app.state::<AppState>().logger.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if spec.trim().is_empty() {
+        let cleaned: Vec<String> = specs
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if cleaned.is_empty() {
             return Err(i18n::t("plugin.missing.update.spec"));
         }
-        plugin::run_plugin_op(
-            &app,
-            &profile,
-            &["update".to_string(), spec.clone()],
-            "plugin.op.update",
-            &spec,
-            &channel,
-            &logger,
-        )
+        let total = cleaned.len();
+        let mut messages: Vec<String> = Vec::new();
+        let mut all_ok = true;
+        for (idx, spec) in cleaned.iter().enumerate() {
+            // 实时进度：经 StepStarted 事件推给前端顶部展示（单个不带编号）。
+            let title = if total == 1 {
+                i18n::t_fmt("plugin.progress.updating.one", &[spec])
+            } else {
+                i18n::t_fmt(
+                    "plugin.progress.updating",
+                    &[&(idx + 1).to_string(), &total.to_string(), spec],
+                )
+            };
+            let _ = channel.send(PipelineEvent::StepStarted {
+                id: format!("item-{idx}"),
+                title,
+            });
+            match plugin::run_plugin_op(
+                &app,
+                &profile,
+                &["update".to_string(), spec.clone()],
+                "plugin.op.update",
+                spec,
+                &channel,
+                &logger,
+            ) {
+                Ok(r) => {
+                    messages.push(r.message);
+                    all_ok &= r.ok;
+                }
+                Err(e) => {
+                    messages.push(e);
+                    all_ok = false;
+                }
+            }
+        }
+        Ok(plugin::PluginOpResult {
+            ok: all_ok,
+            message: messages.join("\n"),
+            action: "plugin.op.update".to_string(),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// 卸载一个或多个插件（specs 为列表中的依赖 key；「全部卸载」= 传全部条目）。
+/// 卸载一个或多个插件（specs 为列表中的依赖 key，支持批量）。
+/// 多个 key 时逐个执行 `dsh plugin remove`（全程只有一次 web 服务的启停封装），
+/// 并逐个推送实时进度事件；结果逐条聚合返回。
 #[tauri::command]
 async fn plugin_remove(
     app: AppHandle,
@@ -500,18 +483,47 @@ async fn plugin_remove(
         if cleaned.is_empty() {
             return Err(i18n::t("plugin.missing.remove.selection"));
         }
-        let subject = cleaned.join("、");
-        let mut args = vec!["remove".to_string()];
-        args.extend(cleaned);
-        plugin::run_plugin_op(
-            &app,
-            &profile,
-            &args,
-            "plugin.op.remove",
-            &subject,
-            &channel,
-            &logger,
-        )
+        let total = cleaned.len();
+        let mut messages: Vec<String> = Vec::new();
+        let mut all_ok = true;
+        for (idx, spec) in cleaned.iter().enumerate() {
+            // 实时进度：经 StepStarted 事件推给前端顶部展示（单个不带编号）。
+            let title = if total == 1 {
+                i18n::t_fmt("plugin.progress.removing.one", &[spec])
+            } else {
+                i18n::t_fmt(
+                    "plugin.progress.removing",
+                    &[&(idx + 1).to_string(), &total.to_string(), spec],
+                )
+            };
+            let _ = channel.send(PipelineEvent::StepStarted {
+                id: format!("item-{idx}"),
+                title,
+            });
+            match plugin::run_plugin_op(
+                &app,
+                &profile,
+                &["remove".to_string(), spec.clone()],
+                "plugin.op.remove",
+                spec,
+                &channel,
+                &logger,
+            ) {
+                Ok(r) => {
+                    messages.push(r.message);
+                    all_ok &= r.ok;
+                }
+                Err(e) => {
+                    messages.push(e);
+                    all_ok = false;
+                }
+            }
+        }
+        Ok(plugin::PluginOpResult {
+            ok: all_ok,
+            message: messages.join("\n"),
+            action: "plugin.op.remove".to_string(),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -536,13 +548,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
-            pick_directory,
             default_parent_dir,
             detect_state,
             detect_tools,
             get_balance,
-            scan_manual_installs,
-            adopt_install,
             install,
             check_for_updates,
             update,
@@ -567,9 +576,18 @@ pub fn run() {
         ])
         .setup(|app| {
             // 先按配置初始化界面语言（启动日志、错误提示等后端文案语言），再初始化日志器。
-            let cfg = config::load_config(app.handle());
+            let mut cfg = config::load_config(app.handle());
             i18n::set_lang(i18n::lang_from_config(&cfg.language));
             let logger = Logger::init(app.handle());
+            // 启动只检测程序运行目录下的安装情况：无安装记录时自动采用
+            // 同目录的 dsh / deepseek-harness 子目录（幂等，仅在发现时写入配置）。
+            if detect::ensure_local_install(&mut cfg) {
+                let _ = config::save_config(app.handle(), &cfg);
+                logger.info(&crate::i18n::t_fmt(
+                    "log.local_install_adopted",
+                    &[cfg.install_dir.as_deref().unwrap_or("—")],
+                ));
+            }
             app.manage(AppState {
                 web_pid: Mutex::new(None),
                 logger: logger.clone(),
@@ -669,12 +687,16 @@ fn auto_check_dsh(handle: AppHandle) {
 }
 
 /// 插件更新检查循环（默认 profile），独立于 DSH 检测。
+/// 失败退坡：本轮检测结果含失败项（或整体查询失败）时，按 30 秒 → 5 分钟 → 20 分钟
+/// 提前复查（封顶为配置间隔），不等到下个定时周期；全部正常则恢复配置间隔。
 fn auto_check_plugins(handle: AppHandle) {
     std::thread::spawn(move || {
         // 比 DSH 检测稍晚，避免启动时并发争用。
         std::thread::sleep(std::time::Duration::from_secs(6));
+        let mut fail_streak = 0u32;
         loop {
             let cfg = config::load_config(&handle);
+            let mut all_resolved = true;
             if cfg.plugin_auto_check_enabled {
                 if let Some(dir) = cfg.install_dir.clone() {
                     let mode = cfg.install_mode.clone();
@@ -686,18 +708,37 @@ fn auto_check_plugins(handle: AppHandle) {
                     if installed {
                         let profile = cfg.plugin_profile.trim().to_string();
                         if !profile.is_empty() {
-                            if let Ok(updates) = plugin::check_plugin_updates(&profile, &dir) {
-                                if let Some(state) = handle.try_state::<AppState>() {
-                                    *state.plugin_updates.lock().unwrap() = Some(updates.clone());
+                            match plugin::check_plugin_updates(&profile, &dir) {
+                                Ok(updates) => {
+                                    if updates.entries.iter().any(|e| e.error.is_some()) {
+                                        all_resolved = false;
+                                    }
+                                    if let Some(state) = handle.try_state::<AppState>() {
+                                        *state.plugin_updates.lock().unwrap() = Some(updates.clone());
+                                    }
+                                    let _ = handle.emit("plugin-updates-checked", &updates);
                                 }
-                                let _ = handle.emit("plugin-updates-checked", &updates);
+                                Err(_) => all_resolved = false,
                             }
                         }
                     }
                 }
             }
             let hours = config::load_config(&handle).plugin_auto_check_interval_hours.max(1);
-            std::thread::sleep(std::time::Duration::from_secs(hours * 3600));
+            let normal_secs = hours * 3600;
+            let sleep_secs = if all_resolved {
+                fail_streak = 0;
+                normal_secs
+            } else {
+                fail_streak += 1;
+                let backoff = match fail_streak {
+                    1 => 30,
+                    2 => 300,
+                    _ => 1200,
+                };
+                normal_secs.min(backoff)
+            };
+            std::thread::sleep(std::time::Duration::from_secs(sleep_secs));
         }
     });
 }

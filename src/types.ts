@@ -151,6 +151,8 @@ export interface PluginUpdateInfo {
   updateAvailable: boolean;
   /** 来源：npm / github / unknown。 */
   source: string;
+  /** 检测失败原因（网络查询失败 / 已装版本无法读取）；null 表示检测正常完成。 */
+  error: string | null;
 }
 
 /** 指定 profile 的插件更新检测结果。 */

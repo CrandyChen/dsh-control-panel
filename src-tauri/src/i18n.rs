@@ -109,6 +109,26 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "Detected a query command. Use `add` to install plugins: dsh plugin --profile web add <package>",
         ),
         "plugin.cmd.unsupported" => ("不支持的插件操作：{0}。安装请使用 add 命令", "Unsupported plugin operation: {0}. Use `add` to install."),
+        // ── 插件更新检测失败原因 ──
+        "plugin.updates.query_failed" => (
+            "查询最新版本失败（网络问题），请点击「检测更新」重试",
+            "Failed to query the latest version (network issue). Click \"Check Updates\" to retry.",
+        ),
+        "plugin.updates.current_unknown" => (
+            "无法读取已安装版本，无法比对更新",
+            "Cannot read the installed version; update comparison unavailable.",
+        ),
+        // ── 插件批量操作的实时进度标题（经 StepStarted 事件推送，前端顶部展示） ──
+        "plugin.progress.updating" => (
+            "正在更新插件（{0}/{1}）：{2}",
+            "Updating plugins ({0}/{1}): {2}",
+        ),
+        "plugin.progress.updating.one" => ("正在更新插件：{0}", "Updating plugin: {0}"),
+        "plugin.progress.removing" => (
+            "正在卸载插件（{0}/{1}）：{2}",
+            "Removing plugins ({0}/{1}): {2}",
+        ),
+        "plugin.progress.removing.one" => ("正在卸载插件：{0}", "Removing plugin: {0}"),
         // ── 插件操作结果 / 自动重试提示 ──
         "plugin.op.install" => ("安装插件", "Install plugin"),
         "plugin.op.update" => ("更新插件", "Update plugin"),
@@ -205,20 +225,14 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "⚙ 保存设置（自动检测 / 间隔 / 语言等）",
             "⚙ Settings saved (auto-check / interval / language, etc.)",
         ),
-        "log.picked_dir" => ("📁 选择目录: {0}", "📁 Selected directory: {0}"),
         "log.detect_state" => (
             "🔎 状态探测: installed={0} version={1} commit={2} running={3}",
             "🔎 State probe: installed={0} version={1} commit={2} running={3}",
         ),
         "log.tools_summary" => ("🔧 环境检测: {0}", "🔧 Runtime check: {0}"),
-        "log.manual_scan_found" => (
-            "🔎 扫描手动安装: 发现 {0} 个候选",
-            "🔎 Manual install scan: found {0} candidate(s)",
-        ),
-        "log.manual_scan_item" => ("   • {0}", "   • {0}"),
-        "log.adopt_done" => (
-            "✅ 已采用手动安装: {0} (version={1} commit={2})",
-            "✅ Adopted manual installation: {0} (version={1} commit={2})",
+        "log.local_install_adopted" => (
+            "✅ 已自动采用程序运行目录下的安装: {0}",
+            "✅ Automatically adopted the installation in the program directory: {0}",
         ),
         "log.update_check" => (
             "🔎 检测更新: behind={0} update_available={1} subject={2}",

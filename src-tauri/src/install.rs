@@ -1,13 +1,11 @@
 //! 安装流程（双模式）。
 //!
 //! - **source（从官方源码安装）**：网络预检 → git clone（自动创建子目录）→ pnpm install →
-//!   pnpm run build。用户选择**父目录**，默认程序运行目录；clone 目标 =
-//!   `<父目录>\<repo 目录名>`（默认 `deepseek-harness`）。依赖外部 git + 内置 node/pnpm。
+//!   pnpm run build。父目录固定为程序运行目录（exe 所在目录），clone 目标 =
+//!   `<程序运行目录>\<repo 目录名>`（默认 `deepseek-harness`）。依赖外部 git + 内置 node/pnpm。
 //! - **prebuilt（预构建内核，默认）**：GitHub 拉取最新
 //!   `deepseek-harness-pkg-windows.zip`，解压到程序运行目录下的 `dsh` 子目录。
 //!   不需要外部 git / pnpm / node。
-
-use std::path::PathBuf;
 
 use tauri::ipc::Channel;
 use tauri::AppHandle;
@@ -19,36 +17,30 @@ use crate::logging::Logger;
 use crate::process::{run_pipeline, PipelineEvent, Step};
 use crate::version::read_commit;
 
-/// 安装入口。`dir` 为父目录（source）或空（prebuilt 使用程序目录下的 dsh 子目录）。
+/// 安装入口。source 使用程序运行目录下的仓库子目录；prebuilt 解压到程序目录下的 dsh 子目录。
 pub fn install(
     app: &AppHandle,
-    dir: &str,
     mode: &str,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
     match mode {
-        "source" => install_from_source(app, dir, channel, logger),
+        "source" => install_from_source(app, channel, logger),
         _ => install_prebuilt(app, channel, logger),
     }
 }
 
 /// 源码安装：克隆官方仓库（gitops/libgit2）→ pnpm install → pnpm run build。
-/// 运行环境（node/pnpm）在克隆仓库的同时并行下载。
+/// 运行环境（node/pnpm）在克隆仓库的同时并行下载。父目录固定为程序运行目录。
 fn install_from_source(
     app: &AppHandle,
-    dir: &str,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
     // git clone 前先检查仓库主机可达性（网络不可达直接报错，不执行 git 操作）。
     crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
 
-    let parent = if dir.trim().is_empty() {
-        config::mode1_default_parent()
-    } else {
-        PathBuf::from(dir)
-    };
+    let parent = config::mode1_default_parent();
     let target = parent.join(repo_dir_name());
     let target_str = target.to_string_lossy().to_string();
 
@@ -227,11 +219,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_install_target_is_parent_plus_repo_dir() {
-        // 源码安装目标 = 选择的父目录 + 仓库目录名（默认 deepseek-harness）。
-        let parent = PathBuf::from(r"D:\dev");
-        let target = parent.join(repo_dir_name());
-        assert_eq!(target.to_string_lossy(), r"D:\dev\deepseek-harness");
+    fn source_install_target_is_exe_dir_plus_repo_dir() {
+        // 源码安装目标 = 程序运行目录（exe 所在目录）+ 仓库目录名（默认 deepseek-harness）。
+        let target = config::mode1_default_parent().join(repo_dir_name());
+        assert!(target.is_absolute());
+        assert!(target.to_string_lossy().ends_with(&repo_dir_name()));
     }
 
     #[test]

@@ -18,7 +18,6 @@ import { api } from "./api";
 import ActionBar from "./components/ActionBar";
 import InstallModal from "./components/InstallModal";
 import LogPanel from "./components/LogPanel";
-import ManualInstallModal from "./components/ManualInstallModal";
 import PluginManagerDialog from "./components/PluginManagerDialog";
 import SettingsDrawer from "./components/SettingsDrawer";
 import StatusCard from "./components/StatusCard";
@@ -360,10 +359,10 @@ function Shell({
         installMode={l.config?.installMode ?? "prebuilt"}
         onOpenGuide={handleOpenGuide}
         onCancel={() => setInstallOpen(false)}
-        onConfirm={async (dir, mode) => {
+        onConfirm={async (mode) => {
           // 点击「开始安装」后立即关闭对话框：进度与报错在日志面板实时展示。
           setInstallOpen(false);
-          void l.install(dir, mode);
+          void l.install(mode);
         }}
       />
 
@@ -387,15 +386,6 @@ function Shell({
           setUninstallOpen(false);
         }}
       />
-
-      {l.manualCandidates && l.manualCandidates.length > 0 && (
-        <ManualInstallModal
-          candidates={l.manualCandidates}
-          busy={busy}
-          onAdopt={l.adoptInstall}
-          onIgnore={l.ignoreManualInstall}
-        />
-      )}
 
       <SettingsDrawer
         open={settingsOpen}

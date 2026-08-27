@@ -11,7 +11,6 @@ pub enum AppError {
     AlreadyInstalled(String),
     PortInUse(u16),
     InvalidPath(String),
-    NotValidInstall(String),
     NotValidPrebuilt(String),
     /// 预构建内核下载失败（网络 / 资产缺失 / 代理等）。
     PrebuiltDownload(String),
@@ -51,9 +50,6 @@ impl AppError {
                 format!("端口 {port} 已被其他程序占用。请先关闭占用该端口的程序（可能是已运行的 DeepSeek Harness）。")
             }
             AppError::InvalidPath(p) => format!("路径不合法，已拒绝操作：{p}"),
-            AppError::NotValidInstall(p) => {
-                format!("{p} 不是有效的 DeepSeek Harness 安装（需包含 .git 与 @deepseek-ai/dsh-root 标识）。GitHub zip 解压的目录无法更新，不在支持范围。")
-            }
             AppError::NotValidPrebuilt(p) => {
                 format!("{p} 不是有效的预构建内核安装（缺少 node_modules\\\\.bin\\\\dsh.cmd）。请删除该目录后重新安装（模式二）。")
             }
@@ -88,9 +84,6 @@ impl AppError {
                 "Port {port} is already in use by another program (possibly a running DeepSeek Harness). Close the program using it first."
             ),
             AppError::InvalidPath(p) => format!("Invalid path, operation rejected: {p}"),
-            AppError::NotValidInstall(p) => format!(
-                "{p} is not a valid DeepSeek Harness installation (requires .git and the @deepseek-ai/dsh-root marker). Directories extracted from GitHub zip cannot be updated and are not supported."
-            ),
             AppError::NotValidPrebuilt(p) => format!(
                 "{p} is not a valid prebuilt kernel installation (missing node_modules\\.bin\\dsh.cmd). Delete the directory and reinstall (mode 2)."
             ),
