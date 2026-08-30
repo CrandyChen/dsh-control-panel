@@ -24,6 +24,7 @@ import {
   Spin,
   Table,
   Tag,
+  theme,
   Tooltip,
   Typography,
 } from "antd";
@@ -65,6 +66,7 @@ interface DetailLine {
 export default function PluginManagerDialog({ open, config, webRunning, onClose, onSaveSettings }: Props) {
   const { message } = App.useApp();
   const { t } = useI18n();
+  const { token } = theme.useToken();
   const [profile, setProfile] = useState(config?.pluginProfile ?? "web");
   /** 本机已存在的 profile 列表（$DSH_HOME/profiles 下的目录），供下拉框选择。 */
   const [profiles, setProfiles] = useState<string[]>([]);
@@ -105,6 +107,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
   const retryTimer = useRef<number | null>(null);
   const retryAttempt = useRef(0);
   const checkUpdatesRef = useRef<((p: string) => Promise<void>) | null>(null);
+  /** 执行详情输出容器，用于自动滚动到最新一行（避免看起来「卡住」）。 */
+  const detailRef = useRef<HTMLDivElement | null>(null);
 
   const clearRetry = useCallback(() => {
     if (retryTimer.current !== null) {
@@ -155,6 +159,12 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
 
   // 卸载组件 / 关闭弹窗时清理待执行的复查定时器。
   useEffect(() => clearRetry, [clearRetry]);
+
+  // 执行详情有新增行时自动滚动到底部（进行中的命令逐行刷出，避免看起来卡住）。
+  useEffect(() => {
+    const el = detailRef.current;
+    if (el && detailOpen) el.scrollTop = el.scrollHeight;
+  }, [detail, detailOpen]);
 
   // 打开时：同步配置中的 profile 并加载列表，重置操作状态。
   // 仅在打开瞬间读取 config；之后 profile 变更由 saveProfile 自行保存并刷新。
@@ -322,6 +332,12 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     [updates],
   );
 
+  /** 检测未完成（查询失败 / 已装版本不可读）的插件数量：既不当作「已是最新」也不当作「可更新」。 */
+  const unconfirmedCount = useMemo(
+    () => (updates?.entries ?? []).filter((e) => e.error).length,
+    [updates],
+  );
+
   const columns: ColumnsType<PluginEntry> = [
     {
       title: t("plugin.col.name"),
@@ -364,6 +380,13 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
               <Tag color="orange" style={{ marginInlineEnd: 0 }}>
                 {t("plugin.update.new", { 0: info.latestVersion ?? "" })}
               </Tag>
+            )}
+            {info?.error && !info.updateAvailable && (
+              <Tooltip title={info.error}>
+                <Tag color="default" style={{ marginInlineEnd: 0 }}>
+                  {t("plugin.update.unconfirmed")}
+                </Tag>
+              </Tooltip>
             )}
           </Flex>
         );
@@ -435,9 +458,20 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         {busy && (
           <Alert
             type="info"
-            icon={<LoadingOutlined spin />}
-            message={activityLine ?? t("plugin.busy.msg", { 0: busyLabel ?? "…" })}
-            description={t("plugin.busy.desc")}
+            icon={<LoadingOutlined spin style={{ fontSize: 22 }} />}
+            message={
+              <Flex align="center" gap={8} wrap>
+                <Typography.Text strong style={{ fontSize: 14 }}>
+                  {activityLine ?? t("plugin.busy.msg", { 0: busyLabel ?? "…" })}
+                </Typography.Text>
+                <Tag color="processing">{t("plugin.busy.running")}</Tag>
+              </Flex>
+            }
+            description={
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {t("plugin.busy.desc")}
+              </Typography.Text>
+            }
           />
         )}
         {result && (
@@ -517,7 +551,9 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 {updatableCount > 0
                   ? t("plugin.updates.found", { 0: updatableCount })
-                  : t("plugin.updates.none")}
+                  : unconfirmedCount > 0
+                    ? t("plugin.updates.unconfirmed", { 0: unconfirmedCount })
+                    : t("plugin.updates.none")}
               </Typography.Text>
             )}
             <Button
@@ -595,21 +631,48 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
               key: "detail",
               label: t("plugin.detail", { 0: detail.length }),
               children: (
-                <pre
-                  style={{
-                    maxHeight: 220,
-                    overflow: "auto",
-                    fontSize: 12,
-                    lineHeight: 1.6,
-                    margin: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-all",
-                  }}
-                >
-                  {detail.length === 0
-                    ? t("plugin.detail.empty")
-                    : detail.map((d) => d.line).join("\n")}
-                </pre>
+                <div style={{ marginTop: 8 }}>
+                  <Flex align="center" gap={8} style={{ marginBottom: 4 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {t("plugin.busy.live")}
+                    </Typography.Text>
+                    {busy && <Tag color="processing">{t("plugin.busy.running")}</Tag>}
+                  </Flex>
+                  <div
+                    ref={detailRef}
+                    style={{
+                      maxHeight: 220,
+                      overflowY: "auto",
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                      margin: 0,
+                      padding: 8,
+                      border: `1px solid ${token.colorBorderSecondary}`,
+                      borderRadius: 6,
+                      background: token.colorBgContainer,
+                      color: token.colorText,
+                      fontFamily:
+                        "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {detail.length === 0
+                      ? t("plugin.detail.empty")
+                      : detail.map((d, i) => (
+                          <div
+                            key={i}
+                            style={
+                              d.stream === "stderr"
+                                ? { color: token.colorError, fontStyle: "italic" }
+                                : undefined
+                            }
+                          >
+                            {d.line || "\u00A0"}
+                          </div>
+                        ))}
+                  </div>
+                </div>
               ),
             },
           ]}

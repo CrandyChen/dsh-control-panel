@@ -1357,10 +1357,30 @@ pub fn parse_latest_semver(output: &str) -> Option<String> {
 }
 
 /// 查询 GitHub 仓库的最高版本 tag，失败返回 None。
-fn query_latest_github_tag(repo: &str, _cwd: &Path) -> Option<String> {
+///
+/// 优先用系统 `git ls-remote --tags` 子进程：它与「更新」路径（pnpm 拉取 git 依赖）
+/// 共用同一套 git/网络/代理配置，因此 GitHub 在「更新」可达时此处同样可达，
+/// 避免进程内 libgit2 的网络栈（不读 `.npmrc`/系统代理 env）与 pnpm 不一致导致
+/// 查询在「更新」可用时反而失败、被静默当作「无更新」。无 git 环境时回退到 libgit2。
+fn query_latest_github_tag(repo: &str, cwd: &Path) -> Option<String> {
     let url = format!("https://github.com/{repo}");
-    let tags = crate::gitops::ls_remote_tags(&url).ok()?;
-    pick_latest_tag(&tags.join("\n"))
+    // 优先：git 子进程（输出为 `<sha>\trefs/tags/<tag>`，pick_latest_tag 可直接解析）。
+    let args = vec!["ls-remote".to_string(), "--tags".to_string(), url.clone()];
+    if let Some(out) = run_query(
+        &["git.cmd", "git"],
+        &args,
+        cwd,
+        Duration::from_secs(NPM_QUERY_TIMEOUT_SECS),
+    ) {
+        if let Some(v) = pick_latest_tag(&out) {
+            return Some(v);
+        }
+    }
+    // 回退：进程内 libgit2。
+    if let Ok(tags) = crate::gitops::ls_remote_tags(&url) {
+        return pick_latest_tag(&tags.join("\n"));
+    }
+    None
 }
 
 fn make_update_info(
