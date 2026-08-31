@@ -66,15 +66,33 @@ fn check_for_updates_git(dir: &Path) -> Result<UpdateCheckResult, AppError> {
 
 /// 从 release tag 提取「版本号」：tag 形如 `dsh-0.1.1-rc.2-32485170079`
 /// （发布方在 semver 后追加了 `-<构建/提交号>`）。提取出 `0.1.1-rc.2` 用于与
-/// 已安装的 CLI 版本比对；无法识别时返回原 tag（保守，避免误判为无更新）。
+/// 已安装的 CLI 版本比对。可剥离任意前置「渠道/来源」前缀（如 `dsh-`、`src-`、`v`）；
+/// 无法识别时返回原 tag（保守，避免误判为无更新）。
 pub fn normalized_tag_version(tag: &str) -> String {
     let s = tag.trim();
-    // 去掉常见前缀 dsh- / v。
-    let s = s
-        .strip_prefix("dsh-")
-        .or_else(|| s.strip_prefix("v"))
-        .unwrap_or(s);
     let mut s = s.to_string();
+    // 反复去掉已知前缀（dsh- / src- / v，逐个尝试，直到不再命中）。
+    loop {
+        let stripped = [
+            "dsh-v-",
+            "dsh-",
+            "src-",
+            "prebuilt-",
+            "v",
+        ]
+        .iter()
+        .find_map(|p| s.strip_prefix(p).map(|x| x.to_string()));
+        match stripped {
+            Some(next) if !next.is_empty() && next != s => s = next,
+            _ => break,
+        }
+    }
+    // 若剥离前缀后仍不以数字开头（未知前缀），从首个 `数字.数字.数字` 处截取版本起点。
+    if !s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if let Some(start) = find_semver_start(&s) {
+            s = s[start..].to_string();
+        }
+    }
     // 反复去掉末尾的 `-<纯数字>`（构建/提交号），如 `-32485170079`。
     loop {
         let Some(idx) = s.rfind('-') else { break };
@@ -87,6 +105,40 @@ pub fn normalized_tag_version(tag: &str) -> String {
         }
     }
     s
+}
+
+/// 在字符串中定位首个 `\d+.\d+.\d+` 版本起点的字节下标；无则返回 None。
+fn find_semver_start(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let mut j = i;
+            let read_num = |j: &mut usize| -> bool {
+                let start = *j;
+                while *j < bytes.len() && bytes[*j].is_ascii_digit() {
+                    *j += 1;
+                }
+                *j > start
+            };
+            if read_num(&mut j) && j < bytes.len() && bytes[j] == b'.' {
+                j += 1;
+                if read_num(&mut j) && j < bytes.len() && bytes[j] == b'.' {
+                    j += 1;
+                    if read_num(&mut j) {
+                        return Some(i);
+                    }
+                }
+            }
+            // 跳过连续数字，避免在数字之间重复尝试。
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
 }
 
 /// 预构建模式：查询 GitHub 最新 release tag，与当前安装 tag 比对。
@@ -129,5 +181,23 @@ mod tests {
             normalized_tag_version("dsh-0.1.1-rc.2-3248517a"),
             "0.1.1-rc.2-3248517a"
         );
+    }
+
+    #[test]
+    fn normalized_tag_version_strips_src_and_other_prefixes() {
+        // 发布方会给某些 release 打上 `src-` 前缀（作为来源标记），须剥掉再比较/排序。
+        assert_eq!(
+            normalized_tag_version("src-0.1.2-alpha.1"),
+            "0.1.2-alpha.1"
+        );
+        assert_eq!(
+            normalized_tag_version("src-0.1.2-alpha.2-12345"),
+            "0.1.2-alpha.2"
+        );
+        assert_eq!(normalized_tag_version("prebuilt-1.2.3"), "1.2.3");
+        // 未知前缀也能从首个数字版本处截取。
+        assert_eq!(normalized_tag_version("misc-0.1.0-rc.1"), "0.1.0-rc.1");
+        // 纯数字起始的版本不受影响。
+        assert_eq!(normalized_tag_version("0.1.2-alpha.2"), "0.1.2-alpha.2");
     }
 }

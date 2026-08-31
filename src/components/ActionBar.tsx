@@ -11,7 +11,6 @@ import {
   GlobalOutlined,
   PoweroffOutlined,
   ReloadOutlined,
-  ToolOutlined,
 } from "@ant-design/icons";
 import { App, Badge, Button, Flex, Space, Tooltip, theme } from "antd";
 import { useState } from "react";
@@ -38,7 +37,6 @@ interface Props {
   onUpdate: () => void;
   /** 检测新版本：返回结果（失败为 null）；有新版时由本组件弹详情对话框。 */
   onCheck: () => Promise<UpdateCheckResult | null>;
-  onRepair: () => void;
   onTerminal: () => void;
   onUninstall: () => void;
   /** 打开插件管理对话框。 */
@@ -58,7 +56,6 @@ export default function ActionBar({
   onStop,
   onUpdate,
   onCheck,
-  onRepair,
   onTerminal,
   onUninstall,
   onPlugins,
@@ -89,45 +86,6 @@ export default function ActionBar({
     setUpdateResult(r);
   };
 
-  const confirmRepair = () => {
-    const stepsLine =
-      installMode === "prebuilt" ? (
-        <>
-          <code>下载最新预构建内核</code> → <code>解压</code> → <code>修复插件</code>
-        </>
-      ) : (
-        <>
-          <code>git reset --hard</code> → <code>git clean</code> →{" "}
-          <code>pnpm install</code> → <code>pnpm run build</code>
-        </>
-      );
-    modal.confirm({
-      title: t("action.repair.confirm.title"),
-      width: 560,
-      content: (
-        <div style={{ fontSize: 13, lineHeight: 1.9 }}>
-          {t("action.repair.confirm.steps")}
-          <br />
-          {stepsLine}
-          <br />
-          {t("action.repair.confirm.esc")}
-          <br />
-          <br />
-          {t("action.repair.confirm.risk")}
-          <br />
-          {t("action.repair.confirm.risk1")}
-          <br />
-          {t("action.repair.confirm.risk2")}
-          <br />
-          {t("action.repair.confirm.risk3")}
-        </div>
-      ),
-      okText: t("action.repair.confirm.ok"),
-      cancelText: t("action.repair.confirm.cancel"),
-      onOk: onRepair,
-    });
-  };
-
   const confirmStop = () => {
     modal.confirm({
       title: t("action.stop.confirm.title"),
@@ -141,14 +99,12 @@ export default function ActionBar({
 
   return (
     <Flex wrap gap={12} align="center">
-      <Tooltip
-        title={installed ? t("action.install.tip.installed") : t("action.install.tip")}
-      >
+      <Tooltip title={t("action.install.tip")}>
         <Button
           type="primary"
           size="large"
           icon={<CloudDownloadOutlined />}
-          disabled={installed || busy}
+          disabled={busy}
           onClick={onInstallClick}
         >
           {t("action.install")}
@@ -219,17 +175,6 @@ export default function ActionBar({
           </Button>
         </Tooltip>
       </Badge>
-
-      <Tooltip title={t("action.repair.tip")}>
-        <Button
-          size="large"
-          icon={<ToolOutlined />}
-          disabled={!installed || busy}
-          onClick={confirmRepair}
-        >
-          {t("action.repair")}
-        </Button>
-      </Tooltip>
 
       <Badge count={pluginUpdateAvailable ? "NEW" : 0} color="red" size="small" offset={[-6, 10]}>
         <Tooltip

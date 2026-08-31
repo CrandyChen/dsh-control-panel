@@ -164,11 +164,42 @@ pub fn ensure_local_install(cfg: &mut crate::config::AppConfig) -> bool {
     }
     match detect_local_default() {
         Some((dir, mode)) => {
-            cfg.install_dir = Some(dir);
+            cfg.install_dir = Some(dir.clone());
             cfg.install_mode = mode.to_string();
+            // 登记为内核记录（版本从磁盘读取，读取失败用「unknown」占位）。
+            let version = read_installed_version(Path::new(&dir), mode)
+                .unwrap_or_else(|| "unknown".to_string());
+            let kid = crate::config::kernel_id(mode, &version);
+            crate::config::upsert_kernel(
+                cfg,
+                crate::config::KernelInstall {
+                    id: kid.clone(),
+                    mode: mode.to_string(),
+                    version,
+                    install_dir: dir.clone(),
+                    commit: if mode == "source" {
+                        crate::version::read_commit(Path::new(&dir))
+                    } else {
+                        None
+                    },
+                    installed_at: crate::config::now_string(),
+                },
+            );
+            if cfg.last_started_kernel_id.is_none() {
+                cfg.last_started_kernel_id = Some(kid);
+            }
             true
         }
         None => false,
+    }
+}
+
+/// 读取安装根的内核版本：源码取 apps/cli；预构建取 CLI 包版本。
+pub fn read_installed_version(dir: &Path, mode: &str) -> Option<String> {
+    if mode == "source" {
+        read_version(dir)
+    } else {
+        read_pkg_version(dir)
     }
 }
 

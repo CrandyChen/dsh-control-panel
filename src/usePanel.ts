@@ -3,6 +3,7 @@
 import { App } from "antd";
 import { createElement, useCallback, useEffect, useRef, useState } from "react";
 import { api, onLogLine, onPluginUpdatesChecked, onUpdateChecked, onWebStatus } from "./api";
+import KernelSelectBody from "./components/KernelSelectBody";
 import { WEB_URL } from "./constants";
 import { useI18n } from "./i18n";
 import { formatMoney } from "./types";
@@ -11,6 +12,7 @@ import type {
   BrowserTab,
   DetectResult,
   AppConfig,
+  KernelInstall,
   LogLine,
   Phase,
   PipelineEvent,
@@ -22,6 +24,36 @@ import type {
 } from "./types";
 
 const MAX_LOG = 600;
+
+/** 语义化版本比较（忽略打头的 v）：返回 >0 表示 a 更大；无法解析时退回字典序。 */
+function compareVersions(a: string, b: string): number {
+  const parse = (s: string) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(s.replace(/^v/i, ""));
+    return m ? { major: +m[1], minor: +m[2], patch: +m[3], pre: m[4] ?? null } : null;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return a.localeCompare(b);
+  for (const k of ["major", "minor", "patch"] as const) {
+    if (pa[k] !== pb[k]) return (pa[k] as number) - (pb[k] as number);
+  }
+  if (!pa.pre && !pb.pre) return 0;
+  if (!pa.pre) return 1;
+  if (!pb.pre) return -1;
+  return pa.pre.localeCompare(pb.pre);
+}
+
+/** 从已装内核里挑出默认启动项：优先最近启动，否则最新预构建，否则第一条。 */
+function defaultKernelId(cfg: AppConfig | null, kernels: KernelInstall[]): string | null {
+  if (cfg?.lastStartedKernelId) return cfg.lastStartedKernelId;
+  const pre = kernels.filter((k) => k.mode === "prebuilt");
+  if (pre.length > 0) {
+    return pre.reduce((max, k) =>
+      compareVersions(k.version, max.version) > 0 ? k : max,
+    ).id;
+  }
+  return kernels[0]?.id ?? null;
+}
 
 /** 从 URL 提取标题（host，失败用默认名）。 */
 function titleFromUrl(url: string, fallback: string): string {
@@ -58,12 +90,12 @@ export interface Panel {
   refresh: () => Promise<void>;
   /** 重新检测运行环境工具（仅源码模式 Git；预构建模式返回空）并更新 tools 状态。 */
   refreshTools: () => Promise<ToolStatus[]>;
-  install: (mode: string) => Promise<void>;
+  install: (mode: string, version?: string | null) => Promise<void>;
   /** 检测新版本：返回结果（失败为 null），由调用方决定是否展示更新详情对话框。 */
   checkForUpdates: () => Promise<UpdateCheckResult | null>;
   update: () => Promise<void>;
   /** 修复安装：清理异常状态并分级重建（详见后端 repair.rs）。 */
-  repair: () => Promise<void>;
+  repair: (kernelId?: string | null) => Promise<void>;
   /** 卸载预览是否正在统计目录大小/文件数（生成清单）。 */
   previewLoading: boolean;
   /** 卸载预览扫描的最新进度行（后端推送，step="scan"）。 */
@@ -368,8 +400,12 @@ export function usePanel(): Panel {
   }, [detect?.installed, checkBalance]);
 
   const install = useCallback(
-    (mode: string) =>
-      withPhase("installing", () => api.install(mode, onPipelineEvent), t("msg.installDone")),
+    (mode: string, version?: string | null) =>
+      withPhase(
+        "installing",
+        () => api.install(mode, version ?? null, onPipelineEvent),
+        t("msg.installDone"),
+      ),
     [onPipelineEvent, withPhase, t],
   );
 
@@ -412,7 +448,12 @@ export function usePanel(): Panel {
 
   /** 修复安装：清理异常状态并分级重建（详见后端 repair.rs）。 */
   const repair = useCallback(
-    () => withPhase("repairing", () => api.repairInstall(onPipelineEvent), t("msg.repairDone")),
+    (kernelId?: string | null) =>
+      withPhase(
+        "repairing",
+        () => api.repairInstall(kernelId ?? null, onPipelineEvent),
+        t("msg.repairDone"),
+      ),
     [onPipelineEvent, withPhase, t],
   );
   const repairRef = useRef(repair);
@@ -458,15 +499,43 @@ export function usePanel(): Panel {
     [onPipelineEvent, withPhase, t],
   );
 
-  const start = useCallback(() => {
-    startedByUs.current = true;
-    appendLog("INFO", t("msg.startLog"));
-    return withPhase(
-      "starting",
-      () => api.startWeb(onPipelineEvent),
-      t("msg.startHint"),
-    );
-  }, [onPipelineEvent, withPhase, appendLog, t]);
+  const startWithKernel = useCallback(
+    async (kernelId: string | null) => {
+      startedByUs.current = true;
+      appendLog("INFO", t("msg.startLog"));
+      return withPhase(
+        "starting",
+        () => api.startWeb(kernelId, onPipelineEvent),
+        t("msg.startHint"),
+      );
+    },
+    [onPipelineEvent, withPhase, appendLog, t],
+  );
+
+  const start = useCallback(async () => {
+    const kernels = config?.installedKernels ?? [];
+    if (kernels.length > 1) {
+      const defaultId = defaultKernelId(config, kernels) ?? kernels[0].id;
+      let chosen = defaultId;
+      modal.confirm({
+        title: t("start.select.title"),
+        content: createElement(KernelSelectBody, {
+          kernels,
+          defaultValue: defaultId,
+          onChange: (id: string) => {
+            chosen = id;
+          },
+        }),
+        okText: t("start.select.ok"),
+        cancelText: t("common.cancel"),
+        onOk: () => {
+          void startWithKernel(chosen);
+        },
+      });
+      return;
+    }
+    await startWithKernel(kernels.length === 1 ? kernels[0].id : null);
+  }, [config, modal, startWithKernel, t]);
 
   const stop = useCallback(
     () =>
@@ -495,15 +564,38 @@ export function usePanel(): Panel {
   const openWebUiRef = useRef(openWebUi);
   openWebUiRef.current = openWebUi;
 
-  /** 打开 DeepSeek Harness 界面：已有 DSH Tab 则激活，否则新建。 */
-  const openDshTab = useCallback(() => {
-    const existing = tabs.find((t) => t.url === WEB_URL);
+  /** 打开 DeepSeek Harness 界面。
+   * 新版内核用 `SameSite=Strict` cookie 做浏览器会话认证；程序内标签页是跨站 iframe，
+   * 无法携带该 cookie（会 401），因此这类内核改经**系统浏览器**打开（顶层导航可正常
+   * 认证）。旧内核（无 token/认证）仍在程序内标签页打开。 */
+  const openDshTab = useCallback(async () => {
+    let url = WEB_URL;
+    try {
+      url = await api.getWebUrl();
+    } catch {
+      // 获取失败回退默认地址。
+    }
+    // 带 token 说明是新版内核：改用系统浏览器（可靠），失败时回退到 iframe 标签页。
+    if (url.includes("?token=")) {
+      try {
+        await api.openWebUi();
+      } catch (e) {
+        message.error(t("msg.openUiFail", { 0: String(e) }));
+        openTabRef.current(url);
+      }
+      return;
+    }
+    const existing = tabs.find((t) => t.url.startsWith(WEB_URL));
     if (existing) {
+      // 每次启动 token 都不同：若已有 DSH Tab，则更新为带新 token 的地址后再激活。
+      if (existing.url !== url) {
+        setTabs((prev) => prev.map((t) => (t.id === existing.id ? { ...t, url } : t)));
+      }
       setActiveTabId(existing.id);
     } else {
-      openTabRef.current(WEB_URL);
+      openTabRef.current(url);
     }
-  }, [tabs]);
+  }, [tabs, message, t]);
 
   const openDshTabRef = useRef(openDshTab);
   openDshTabRef.current = openDshTab;

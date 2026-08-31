@@ -250,7 +250,6 @@ function Shell({
               onStop={l.stop}
               onUpdate={l.update}
               onCheck={l.checkForUpdates}
-              onRepair={l.repair}
               onTerminal={l.openTerminal}
               onUninstall={() => {
                 // 立即打开对话框并后台统计卸载清单（统计耗时较长，对话框内展示进度）。
@@ -357,12 +356,17 @@ function Shell({
         open={installOpen}
         tools={l.tools}
         installMode={l.config?.installMode ?? "prebuilt"}
+        installedKernels={l.config?.installedKernels ?? []}
         onOpenGuide={handleOpenGuide}
         onCancel={() => setInstallOpen(false)}
-        onConfirm={async (mode) => {
-          // 点击「开始安装」后立即关闭对话框：进度与报错在日志面板实时展示。
+        onInstall={async (mode, version) => {
+          // 点击「安装 / 修复安装」后立即关闭对话框：进度与报错在日志面板实时展示。
           setInstallOpen(false);
-          void l.install(mode);
+          void l.install(mode, version);
+        }}
+        onRepair={async (kernelId) => {
+          setInstallOpen(false);
+          void l.repair(kernelId);
         }}
       />
 

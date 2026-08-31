@@ -105,6 +105,133 @@ pub struct ReleaseInfo {
     pub size: u64,
 }
 
+/// 一个可安装的预构建内核版本（来自 GitHub release 列表）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrebuiltRelease {
+    /// 原始 tag。
+    pub tag: String,
+    /// 归一化版本号（如 0.1.2-alpha.2）。
+    pub version: String,
+    /// 资产下载地址（deepseek-harness-pkg-windows.zip）。
+    pub url: String,
+    /// 资产大小（字节）；解析失败为 0。
+    pub size: u64,
+    /// 是否为 pre-release。
+    pub prerelease: bool,
+    /// 发布时间（ISO 8601）。
+    pub published_at: String,
+}
+
+/// 单次解析时的原始 release 记录（与 PowerShell 输出的 JSON 对齐）。
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawRelease {
+    tag: String,
+    prerelease: bool,
+    published: String,
+    url: String,
+    size: u64,
+}
+
+/// 查询所有预构建内核发布版本（GitHub REST API，无鉴权），返回可安装的版本列表，
+/// 按版本号降序。失败自动重试多次；release list 可能含无资产的历史版本，已过滤。
+pub fn list_prebuilt_releases() -> Result<Vec<PrebuiltRelease>, AppError> {
+    let mut last_err: Option<AppError> = None;
+    for attempt in 0..3u32 {
+        match list_prebuilt_releases_once() {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(1000 * (attempt as u64 + 1)));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        AppError::PrebuiltDownload("查询预构建内核版本列表失败".into())
+    }))
+}
+
+/// 单次查询（无重试版本）。
+fn list_prebuilt_releases_once() -> Result<Vec<PrebuiltRelease>, AppError> {
+    let script = r#"
+$ProgressPreference='SilentlyContinue'
+$h=@{'User-Agent'='DSH-Control-Panel'}
+$r=Invoke-RestMethod -Uri '@@RELEASES@@' -Headers $h
+$items=@()
+foreach($rel in $r){
+  if($rel.draft){ continue }
+  $asset=$rel.assets | Where-Object { $_.name -like '*@@ASSET@@*' } | Select-Object -First 1
+  if(-not $asset){ continue }
+  $items += [pscustomobject]@{
+    tag=$rel.tag_name
+    prerelease=[bool]$rel.prerelease
+    published=[string]$rel.published_at
+    url=[string]$asset.browser_download_url
+    size=[uint64]$asset.size
+  }
+}
+$items | ConvertTo-Json -Compress
+"#;
+    let script = script
+        .replace("@@RELEASES@@", config::PREBUILT_PKG_RELEASES_API)
+        .replace("@@ASSET@@", config::PREBUILT_PKG_ASSET);
+    let out = powershell_capture(&script)?;
+    if out.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let raws: Vec<RawRelease> = serde_json::from_str(&out)
+        .map_err(|e| AppError::PrebuiltDownload(format!("解析预构建内核版本列表失败: {e}")))?;
+    let mut releases: Vec<PrebuiltRelease> = raws
+        .into_iter()
+        .filter(|r| !r.tag.trim().is_empty() && !r.url.trim().is_empty())
+        .map(|r| {
+            let version = crate::version::normalized_tag_version(&r.tag);
+            PrebuiltRelease {
+                tag: r.tag,
+                version,
+                url: r.url,
+                size: r.size,
+                prerelease: r.prerelease,
+                published_at: r.published,
+            }
+        })
+        .collect();
+    // 按归一化版本（语义化优先）降序排列，供前端默认选最新。
+    releases.sort_by(|a, b| {
+        let ord = compare_version_strings(&b.version, &a.version);
+        if ord != std::cmp::Ordering::Equal {
+            ord
+        } else {
+            b.published_at.cmp(&a.published_at)
+        }
+    });
+    // 归一化后可能重复（如带 build 号 tag 归一化相同），按最新 tag 保留首个。
+    releases.dedup_by(|a, b| a.version == b.version);
+    Ok(releases)
+}
+
+fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(va), Ok(vb)) => va.cmp(&vb),
+        _ => a.cmp(b),
+    }
+}
+
+/// 按归一化版本号查找对应 release 的下载信息（用于「修复安装」指定已装版本）。
+pub fn release_by_version(version: &str) -> Result<ReleaseInfo, AppError> {
+    let list = list_prebuilt_releases()?;
+    list.into_iter()
+        .find(|r| r.version == version)
+        .map(|r| ReleaseInfo {
+            tag: r.tag,
+            url: r.url,
+            size: r.size,
+        })
+        .ok_or_else(|| {
+            AppError::PrebuiltDownload(format!("未找到版本 {version} 的预构建资源"))
+        })
+}
+
 /// 查询最新 release 的 tag、下载地址与资产大小（GitHub REST API，无鉴权）。
 /// GitHub 在国内常抽筋：失败自动重试多次（每次递增等待）。
 pub fn latest_release() -> Result<ReleaseInfo, AppError> {

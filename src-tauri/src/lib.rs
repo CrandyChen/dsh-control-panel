@@ -41,9 +41,12 @@ use process::PipelineEvent;
 use uninstall::UninstallPreview;
 use version::UpdateCheckResult;
 
-/// 全局状态：web 服务 PID + 日志器 + 卸载预览扫描取消标志 + 插件更新检测结果。
+/// 全局状态：web 服务 PID + 最近一次启动捕获的访问 URL + 日志器 + 卸载预览扫描取消标志 +
+/// 插件更新检测结果。
 pub struct AppState {
     pub web_pid: Mutex<Option<u32>>,
+    /// 启动 web 服务后捕获的带 token 访问 URL（新版内核；旧内核为 None，回退 WEB_URL）。
+    pub web_url: Mutex<Option<String>>,
     pub logger: Logger,
     /// 卸载预览扫描的取消标志（`uninstall_preview` 运行期间存在，取消后清空）。
     pub preview_cancel: Mutex<Option<Arc<AtomicBool>>>,
@@ -152,14 +155,24 @@ async fn get_balance() -> balance::BalanceResult {
 async fn install(
     app: AppHandle,
     mode: String,
+    version: Option<String>,
     channel: Channel<PipelineEvent>,
 ) -> Result<(), String> {
     let logger = app.state::<AppState>().logger.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        install::install(&app, &mode, &channel, &logger)
+        install::install(&app, &mode, version, &channel, &logger)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 列出所有可安装的预构建内核版本（来自 GitHub release 列表），供安装弹窗选择。
+#[tauri::command]
+async fn list_prebuilt_releases() -> Result<Vec<prebuilt::PrebuiltRelease>, String> {
+    tauri::async_runtime::spawn_blocking(prebuilt::list_prebuilt_releases)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.friendly())
 }
 
 #[tauri::command]
@@ -268,9 +281,13 @@ async fn uninstall(
 }
 
 #[tauri::command]
-async fn start_web(app: AppHandle, channel: Channel<PipelineEvent>) -> Result<(), String> {
+async fn start_web(
+    app: AppHandle,
+    kernel_id: Option<String>,
+    channel: Channel<PipelineEvent>,
+) -> Result<(), String> {
     let logger = app.state::<AppState>().logger.clone();
-    tauri::async_runtime::spawn_blocking(move || web::start_web(&app, &channel, &logger))
+    tauri::async_runtime::spawn_blocking(move || web::start_web(&app, kernel_id, &channel, &logger))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -280,6 +297,20 @@ async fn stop_web(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || web::stop_web(&app))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// 返回最近一次启动 web 服务后捕获的访问 URL（含 token）；未捕获时回退默认地址。
+/// 新版内核需要携带进程级 token 才能打开界面，旧内核无 token 则用默认地址。
+#[tauri::command]
+fn get_web_url(app: AppHandle) -> String {
+    let url = app
+        .state::<AppState>()
+        .web_url
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| config::WEB_URL.to_string());
+    url
 }
 
 #[tauri::command]
@@ -307,10 +338,18 @@ fn open_terminal(app: AppHandle) -> Result<(), String> {
 fn open_web_ui(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     let logger = app.state::<AppState>().logger.clone();
+    // 新版内核需要携带进程级 token 才能打开界面；未捕获时回退默认地址（旧内核）。
+    let url = app
+        .state::<AppState>()
+        .web_url
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| config::WEB_URL.to_string());
     app.opener()
-        .open_url(config::WEB_URL, None::<&str>)
+        .open_url(&url, None::<&str>)
         .map_err(|e| e.to_string())?;
-    logger.info(&crate::i18n::t_fmt("log.open_browser", &[config::WEB_URL]));
+    logger.info(&crate::i18n::t_fmt("log.open_browser", &[&url]));
     Ok(())
 }
 
@@ -530,12 +569,19 @@ async fn plugin_remove(
 }
 
 /// 修复安装：清理异常状态并分级重建 DeepSeek Harness 安装（详见 repair.rs 模块文档）。
+/// `kernel_id` 指定要修复的内核；`None` 时修复当前活动内核。
 #[tauri::command]
-async fn repair_install(app: AppHandle, channel: Channel<PipelineEvent>) -> Result<(), String> {
+async fn repair_install(
+    app: AppHandle,
+    kernel_id: Option<String>,
+    channel: Channel<PipelineEvent>,
+) -> Result<(), String> {
     let logger = app.state::<AppState>().logger.clone();
-    tauri::async_runtime::spawn_blocking(move || repair::repair(&app, &channel, &logger))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        repair::repair(&app, kernel_id, &channel, &logger)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ─────────────────────────────── 启动 ───────────────────────────────
@@ -553,6 +599,7 @@ pub fn run() {
             detect_tools,
             get_balance,
             install,
+            list_prebuilt_releases,
             check_for_updates,
             update,
             repair_install,
@@ -561,6 +608,7 @@ pub fn run() {
             uninstall,
             start_web,
             stop_web,
+            get_web_url,
             open_terminal,
             open_web_ui,
             open_external,
@@ -590,6 +638,7 @@ pub fn run() {
             }
             app.manage(AppState {
                 web_pid: Mutex::new(None),
+                web_url: Mutex::new(None),
                 logger: logger.clone(),
                 preview_cancel: Mutex::new(None),
                 plugin_updates: Mutex::new(None),

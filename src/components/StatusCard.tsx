@@ -137,6 +137,15 @@ export default function StatusCard({
             ),
           },
           {
+            key: "kernels",
+            label: t("status.kernels"),
+            children: (
+              <Tag color="cyan" style={{ marginInlineEnd: 0 }}>
+                {t("status.kernels.count", { 0: config?.installedKernels.length ?? 0 })}
+              </Tag>
+            ),
+          },
+          {
             key: "version",
             label: t("status.version"),
             children: (

@@ -30,6 +30,31 @@ export interface AppConfig {
   theme: "auto" | "light" | "dark";
   /** 界面语言：auto（跟随系统，非中英默认英文）/ zh-CN / en。 */
   language: "auto" | "zh-CN" | "en";
+  /** 已安装的内核版本注册表（多版本相互独立，共享 ~/.dsh 数据目录）。 */
+  installedKernels: KernelInstall[];
+  /** 最近一次正常启动的内核 id（启动选择框的默认勾选项；首次为最新预构建内核）。 */
+  lastStartedKernelId: string | null;
+}
+
+/** 一个已安装的 DSH 内核版本。 */
+export interface KernelInstall {
+  /** 唯一标识：prebuilt-<version>；源码模式固定为 "source"。 */
+  id: string;
+  mode: InstallMode;
+  version: string;
+  installDir: string;
+  commit: string | null;
+  installedAt: string;
+}
+
+/** 一个可安装的预构建内核版本（来自 GitHub release 列表）。 */
+export interface PrebuiltRelease {
+  tag: string;
+  version: string;
+  url: string;
+  size: number;
+  prerelease: boolean;
+  publishedAt: string;
 }
 
 export interface DetectResult {

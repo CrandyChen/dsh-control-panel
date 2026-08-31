@@ -10,23 +10,25 @@
 use tauri::ipc::Channel;
 use tauri::AppHandle;
 
-use crate::config::{self, repo_dir_name};
+use crate::config;
 use crate::detect::{is_valid_repo, read_pkg_version, read_version};
 use crate::error::AppError;
 use crate::logging::Logger;
 use crate::process::{run_pipeline, PipelineEvent, Step};
 use crate::version::read_commit;
 
-/// 安装入口。source 使用程序运行目录下的仓库子目录；prebuilt 解压到程序目录下的 dsh 子目录。
+/// 安装入口。source 使用程序运行目录下的仓库子目录（仅最新版）；prebuilt 安装指定
+/// 版本（`version` 为归一化版本号，None 表示最新发布版），解压到该版本独立目录。
 pub fn install(
     app: &AppHandle,
     mode: &str,
+    version: Option<String>,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
     match mode {
         "source" => install_from_source(app, channel, logger),
-        _ => install_prebuilt(app, channel, logger),
+        _ => install_prebuilt(app, version, channel, logger),
     }
 }
 
@@ -41,7 +43,7 @@ fn install_from_source(
     crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
 
     let parent = config::mode1_default_parent();
-    let target = parent.join(repo_dir_name());
+    let target = config::source_install_dir();
     let target_str = target.to_string_lossy().to_string();
 
     if target.exists() && !target.is_dir() {
@@ -114,16 +116,37 @@ fn install_from_source(
     cfg.update_available = false;
     cfg.latest_commit = None;
     cfg.latest_subject = None;
+    register_source_kernel(&mut cfg, &target, &target_str);
     config::save_config(app, &cfg).map_err(|e| e)?;
 
     logger.info(&crate::i18n::t_fmt("log.install_done", &[&target_str]));
     Ok(())
 }
 
-/// 预构建内核安装：下载最新 release zip → 解压到程序目录下的 dsh 子目录。
-/// 完成后校准 `~/.dsh/profiles/*` 的 bundle 列表（移除内核无法解析的条目）。
+/// 登记源码模式内核（唯一一份，id 固定为 "source"）并设为活动内核。
+fn register_source_kernel(cfg: &mut config::AppConfig, target: &std::path::Path, dir: &str) {
+    let version = read_version(target).unwrap_or_else(|| "unknown".to_string());
+    let id = config::kernel_id("source", &version);
+    config::upsert_kernel(
+        cfg,
+        config::KernelInstall {
+            id: id.clone(),
+            mode: "source".to_string(),
+            version,
+            install_dir: dir.to_string(),
+            commit: read_commit(target),
+            installed_at: config::now_string(),
+        },
+    );
+    config::set_active_kernel(cfg, &id);
+}
+
+/// 预构建内核安装：下载指定版本（或最新）release zip → 解压到该版本独立目录
+/// `<exe_dir>\dsh-<version>`。失败先等运行环境线程结束，避免残留进度事件。
+/// 完成后注册内核记录并校准 `~/.dsh/profiles/*` 的 bundle 列表。
 fn install_prebuilt(
     app: &AppHandle,
+    version: Option<String>,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
@@ -140,9 +163,21 @@ fn install_prebuilt(
 
     // 内核步骤在闭包内执行：失败也先等运行环境线程结束，避免其继续向界面推送残留进度事件。
     let kernel_result = (|| -> Result<(), String> {
-        let release = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
-        let tmp = std::env::temp_dir().join("dsh-prebuilt.zip");
-        crate::prebuilt::download_asset(&release.url, &tmp, release.size, channel, "download")
+        // 解析目标版本与下载地址：指定版本 → 该 release；否则最新发布版。
+        let (_tag, url, size, dir_version) = match version.as_deref() {
+            Some(v) => {
+                let rel = crate::prebuilt::release_by_version(v).map_err(|e| e.friendly())?;
+                (rel.tag, rel.url, rel.size, v.to_string())
+            }
+            None => {
+                let rel = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
+                let norm = crate::version::normalized_tag_version(&rel.tag);
+                (rel.tag, rel.url, rel.size, norm)
+            }
+        };
+        let dest = config::kernel_install_dir("prebuilt", &dir_version);
+
+        crate::prebuilt::download_asset(&url, &std::env::temp_dir().join("dsh-prebuilt.zip"), size, channel, "download")
             .map_err(|e| e.friendly())?;
 
         let _ = channel.send(PipelineEvent::StepFinished {
@@ -154,9 +189,13 @@ fn install_prebuilt(
             id: "extract".into(),
             title: crate::i18n::t("step.extract"),
         });
-        let dest = config::mode2_install_dir();
-        crate::prebuilt::extract_zip_with_progress(&tmp, &dest, channel, "extract")
-            .map_err(|e| e.friendly())?;
+        crate::prebuilt::extract_zip_with_progress(
+            &std::env::temp_dir().join("dsh-prebuilt.zip"),
+            &dest,
+            channel,
+            "extract",
+        )
+        .map_err(|e| e.friendly())?;
         let _ = channel.send(PipelineEvent::StepFinished {
             id: "extract".into(),
             exit_code: 0,
@@ -169,7 +208,7 @@ fn install_prebuilt(
             return Err(e.friendly());
         }
         let root_str = root.to_string_lossy().to_string();
-        let version = read_pkg_version(&root).unwrap_or(release.tag.clone());
+        let installed_version = read_pkg_version(&root).unwrap_or_else(|| dir_version.clone());
 
         // profile bundle 校准：移除其它发行版残留的、当前内核无法解析的 bundle。
         log_reconcile(&root, logger);
@@ -177,12 +216,26 @@ fn install_prebuilt(
         let mut cfg = config::load_config(app);
         cfg.install_dir = Some(root_str.clone());
         cfg.install_mode = "prebuilt".to_string();
-        cfg.installed_version = Some(version);
+        cfg.installed_version = Some(installed_version.clone());
         cfg.installed_commit = None;
         cfg.last_updated_at = Some(config::now_string());
         cfg.update_available = false;
         cfg.latest_commit = None;
         cfg.latest_subject = None;
+        // 登记内核（id 按归一化版本），并设为活动内核。
+        let kernel_id = config::kernel_id("prebuilt", &installed_version);
+        config::upsert_kernel(
+            &mut cfg,
+            config::KernelInstall {
+                id: kernel_id.clone(),
+                mode: "prebuilt".to_string(),
+                version: installed_version.clone(),
+                install_dir: root_str.clone(),
+                commit: None,
+                installed_at: config::now_string(),
+            },
+        );
+        config::set_active_kernel(&mut cfg, &kernel_id);
         config::save_config(app, &cfg).map_err(|e| e)?;
 
         let _ = channel.send(PipelineEvent::Finished { ok: true });
@@ -221,9 +274,9 @@ mod tests {
     #[test]
     fn source_install_target_is_exe_dir_plus_repo_dir() {
         // 源码安装目标 = 程序运行目录（exe 所在目录）+ 仓库目录名（默认 deepseek-harness）。
-        let target = config::mode1_default_parent().join(repo_dir_name());
+        let target = config::mode1_default_parent().join(config::repo_dir_name());
         assert!(target.is_absolute());
-        assert!(target.to_string_lossy().ends_with(&repo_dir_name()));
+        assert!(target.to_string_lossy().ends_with(&config::repo_dir_name().as_str()));
     }
 
     #[test]

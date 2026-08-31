@@ -32,17 +32,28 @@ pub fn port_in_use(port: u16) -> bool {
 }
 
 /// 启动 `pnpm dsh web`；输出流式推送，并轮询端口直到就绪/失败。
+/// `kernel_id` 指定启动的内核版本（注册表中的 id）；`None` 时启动当前活动内核。
 pub fn start_web(
     app: &AppHandle,
+    kernel_id: Option<String>,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
     let cfg = config::load_config(app);
-    let mode = cfg.install_mode.clone();
-    let dir = cfg
-        .install_dir
-        .clone()
-        .ok_or_else(|| AppError::NotInstalled.friendly())?;
+    let (mode, dir) = match kernel_id.as_deref() {
+        Some(id) => {
+            let k = config::find_kernel(&cfg, id)
+                .ok_or_else(|| AppError::NotInstalled.friendly())?;
+            (k.mode.clone(), k.install_dir.clone())
+        }
+        None => (
+            cfg.install_mode.clone(),
+            cfg
+                .install_dir
+                .clone()
+                .ok_or_else(|| AppError::NotInstalled.friendly())?,
+        ),
+    };
     let path = PathBuf::from(&dir);
     if mode == "source" {
         if !is_valid_repo(&path) {
@@ -53,6 +64,12 @@ pub fn start_web(
     }
     if port_in_use(WEB_PORT) {
         return Err(AppError::PortInUse(WEB_PORT).friendly());
+    }
+    // 选定内核后将其设为活动内核（同步镜像字段与「上次启动」记录）。
+    if let Some(id) = kernel_id.as_deref() {
+        let mut cfg2 = config::load_config(app);
+        config::set_active_kernel(&mut cfg2, id);
+        let _ = config::save_config(app, &cfg2);
     }
 
     // 运行环境（node/pnpm）就绪，供 dsh web 命令使用（首次会下载）。
@@ -110,6 +127,8 @@ pub fn start_web(
     let pid = child.id();
     if let Some(state) = app.try_state::<AppState>() {
         *state.web_pid.lock().unwrap() = Some(pid);
+        // 新一次启动：清空上一进程捕获的访问 URL（可能已失效）。
+        *state.web_url.lock().unwrap() = None;
     }
     logger.info(&crate::i18n::t_fmt("log.web_pid", &[&pid.to_string()]));
 
@@ -121,9 +140,17 @@ pub fn start_web(
     let ch = channel.clone();
     let logger2 = logger.clone();
     let tail2 = tail.clone();
+    let app3 = app.clone();
     if let Some(out) = stdout {
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
+                // 捕获 DSH 输出的带 token 访问 URL（新版内核；旧内核无则保持 None）。
+                if let Some(url) = extract_token_url(&line) {
+                    logger2.info(&crate::i18n::t("log.web_url_captured"));
+                    if let Some(state) = app3.try_state::<AppState>() {
+                        *state.web_url.lock().unwrap() = Some(url);
+                    }
+                }
                 let _ = ch.send(PipelineEvent::Output {
                     step: "web".into(),
                     stream: "stdout".into(),
@@ -156,13 +183,40 @@ pub fn start_web(
     // 超时 120s → error。
     let app2 = app.clone();
     let channel2 = channel.clone();
+    let logger3 = logger.clone();
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
         let deadline = started + std::time::Duration::from_secs(120);
+        // 是否需要等待 DSH 打印出带 token 的访问地址（新内核认证）。
+        let mut awaiting_token = false;
         loop {
-            if http_ready(WEB_PORT) {
-                let _ = app2.emit("web-status", "ready");
-                return;
+            if !awaiting_token {
+                match http_probe(WEB_PORT) {
+                    HttpProbe::NotReady => {}
+                    HttpProbe::Ready => {
+                        // 旧内核直接可用：无需 token。
+                        let _ = app2.emit("web-status", "ready");
+                        return;
+                    }
+                    HttpProbe::ReadyAuth => {
+                        // 新内核要求浏览器会话认证。`dsh-web-app` 在服务就绪后会打印
+                        // `dsh web: …?token=…`（进程级会话令牌，非持久化）。必须等它被
+                        // stdout 线程捕获后再发 ready，否则 openDshTab / open_web_ui 会
+                        // 回退到不带 token 的默认地址（导致 401）。
+                        awaiting_token = true;
+                        logger3.info(&crate::i18n::t("log.web_auth_required"));
+                    }
+                }
+            } else {
+                let has_token = app2
+                    .try_state::<AppState>()
+                    .map(|s| s.web_url.lock().unwrap().is_some())
+                    .unwrap_or(false);
+                if has_token {
+                    logger3.info(&crate::i18n::t("log.web_ready_auth"));
+                    let _ = app2.emit("web-status", "ready");
+                    return;
+                }
             }
             if let Ok(Some(status)) = child.try_wait() {
                 let elapsed = started.elapsed().as_secs();
@@ -192,7 +246,7 @@ pub fn start_web(
                 let _ = app2.emit("web-status", "error");
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     });
 
@@ -209,14 +263,81 @@ fn push_tail(tail: &Mutex<VecDeque<String>>, line: String) {
     }
 }
 
-/// 判断 HTTP 响应头是否为 2xx（用于确认页面真正可响应，而非仅端口可连）。
-fn is_http_ok(head: &[u8]) -> bool {
-    let s = String::from_utf8_lossy(head);
-    s.starts_with("HTTP/1.1 2") || s.starts_with("HTTP/1.0 2")
+/// 从 DSH web 进程输出行中提取带 token 的访问 URL。
+///
+/// 新版内核的 `dsh-web-app` 会打印 `dsh web: <authenticatedUrl> (LAN: …)`，
+/// 其中 `<authenticatedUrl>` 为 `http://127.0.0.1:<port>/?token=<…>`，token 是进程级的
+/// 浏览器会话启动令牌（每进程动态生成，不持久化）。面板必须捕获它才能在系统浏览器或
+/// 内嵌 iframe 里正常打开界面（否则 `GET /` 返回 401）。只接受 loopback 主机地址
+/// （127.x / localhost），返回捕获到的完整 URL（含 token）；无匹配返回 None。
+fn extract_token_url(line: &str) -> Option<String> {
+    // 先定位 token 参数（可能是 `?token=` 或前面的 `&token=`）。
+    let (token_pos, token_assignment_len) = {
+        let p = line.find("?token=");
+        match p {
+            Some(p) => (p, "?token=".len()),
+            None => {
+                let p = line.find("&token=")?;
+                (p, "&token=".len())
+            }
+        }
+    };
+    // 找到同一行里 URL 的起点（最近的一个 http:// 或 https://）。
+    let up_to = &line[..token_pos];
+    let url_start = up_to
+        .rfind("http://")
+        .or_else(|| up_to.rfind("https://"))?;
+    // token 值到下一个空白/控制字符为止（base64url 不含空白；按行尾或空格截断）。
+    let rest = &line[token_pos + token_assignment_len..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c.is_control())
+        .map(|i| token_pos + token_assignment_len + i)
+        .unwrap_or(line.len());
+    let candidate = &line[url_start..end];
+    if end > url_start && is_loopback_url(candidate) {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
 }
 
-/// HTTP 就绪探测：向 127.0.0.1:port 发送 GET /，收到 2xx 响应才算就绪。
-fn http_ready(port: u16) -> bool {
+/// 判断 URL 是否指向 loopback 主机（127.x / localhost），即面板自身的 DSH web 实例。
+fn is_loopback_url(url: &str) -> bool {
+    let Some(after_scheme) = url.split("://").nth(1) else {
+        return false;
+    };
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = authority.split(':').next().unwrap_or(authority);
+    host.eq_ignore_ascii_case("localhost") || host.starts_with("127.")
+}
+
+/// 就绪探测结果分类。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HttpProbe {
+    /// 端口未就绪或响应异常。
+    NotReady,
+    /// 服务已就绪（返回 2xx，旧内核），无需 token 即可访问。
+    Ready,
+    /// 服务已就绪但要求浏览器会话认证（3xx/4xx 等，如新内核的 401/303）——
+    /// 需携带 `?token=` 才能正常打开界面。
+    ReadyAuth,
+}
+
+/// 判断 HTTP 响应头是否为一个合法状态行（服务可响应），并区分 2xx 与认证需求。
+fn classify_http_header(head: &[u8]) -> HttpProbe {
+    let s = String::from_utf8_lossy(head);
+    if s.starts_with("HTTP/1.1 2") || s.starts_with("HTTP/1.0 2") {
+        return HttpProbe::Ready;
+    }
+    if s.starts_with("HTTP/1.1 ") || s.starts_with("HTTP/1.0 ") {
+        return HttpProbe::ReadyAuth;
+    }
+    HttpProbe::NotReady
+}
+
+/// HTTP 就绪探测：向 127.0.0.1:port 发送 GET /，收到任何合法 HTTP 状态行即视为就绪，
+/// 并区分是否为「要求认证」的新内核（旧内核 200；新内核 401/303）。
+fn http_probe(port: u16) -> HttpProbe {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
@@ -225,7 +346,7 @@ fn http_ready(port: u16) -> bool {
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         Duration::from_millis(500),
     ) else {
-        return false;
+        return HttpProbe::NotReady;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
@@ -233,11 +354,11 @@ fn http_ready(port: u16) -> bool {
         .write_all(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
         .is_err()
     {
-        return false;
+        return HttpProbe::NotReady;
     }
     let mut buf = [0u8; 128];
     let n = stream.read(&mut buf).unwrap_or(0);
-    is_http_ok(&buf[..n])
+    classify_http_header(&buf[..n])
 }
 
 /// 从 `netstat -ano` 输出中解析监听 3080 端口的 PID。
@@ -321,14 +442,71 @@ mod tests {
     }
 
     #[test]
-    fn http_ok_detection() {
-        assert!(is_http_ok(b"HTTP/1.1 200 OK\r\nContent-Type: text/html"));
-        assert!(is_http_ok(b"HTTP/1.0 204 No Content"));
-        assert!(is_http_ok(b"HTTP/1.1 299 Almost Fine"));
-        assert!(!is_http_ok(b"HTTP/1.1 301 Moved Permanently"));
-        assert!(!is_http_ok(b"HTTP/1.1 404 Not Found"));
-        assert!(!is_http_ok(b"HTTP/1.1 500 Internal Server Error"));
-        assert!(!is_http_ok(b""));
-        assert!(!is_http_ok(b"garbage"));
+    fn http_probe_classification() {
+        // 2xx（旧内核）→ 可直接就绪，无需 token。
+        assert_eq!(
+            classify_http_header(b"HTTP/1.1 200 OK\r\nContent-Type: text/html"),
+            HttpProbe::Ready
+        );
+        assert_eq!(classify_http_header(b"HTTP/1.0 204 No Content"), HttpProbe::Ready);
+        assert_eq!(classify_http_header(b"HTTP/1.1 299 Almost Fine"), HttpProbe::Ready);
+        // 401/303 等（新内核认证）→ 就绪但需 token。
+        assert_eq!(
+            classify_http_header(b"HTTP/1.1 401 Unauthorized\r\ncontent-type: text/plain"),
+            HttpProbe::ReadyAuth
+        );
+        assert_eq!(
+            classify_http_header(b"HTTP/1.0 303 See Other\r\nlocation: /"),
+            HttpProbe::ReadyAuth
+        );
+        assert_eq!(classify_http_header(b"HTTP/1.1 404 Not Found"), HttpProbe::ReadyAuth);
+        assert_eq!(
+            classify_http_header(b"HTTP/1.1 500 Internal Server Error"),
+            HttpProbe::ReadyAuth
+        );
+        // 无 / 乱响应 → 未就绪。
+        assert_eq!(classify_http_header(b""), HttpProbe::NotReady);
+        assert_eq!(classify_http_header(b"garbage"), HttpProbe::NotReady);
+        assert_eq!(classify_http_header(b"HTTP/2 200 OK"), HttpProbe::NotReady);
+    }
+
+    #[test]
+    fn token_url_extraction() {
+        assert_eq!(
+            extract_token_url("dsh web: http://127.0.0.1:3080/?token=abc-DEF_123"),
+            Some("http://127.0.0.1:3080/?token=abc-DEF_123".to_string())
+        );
+        // 行首留有空白亦能提取。
+        assert_eq!(
+            extract_token_url("  http://127.0.0.1:3080/?token=tok1"),
+            Some("http://127.0.0.1:3080/?token=tok1".to_string())
+        );
+        // 无 token 的行返回 None。
+        assert_eq!(extract_token_url("dsh web: http://127.0.0.1:3080"), None);
+        assert_eq!(extract_token_url("some unrelated output"), None);
+        assert_eq!(extract_token_url(""), None);
+    }
+
+    #[test]
+    fn token_url_extraction_ignores_other_hosts() {
+        // 非本机（非 loopback）的 token 地址不误捕获。
+        assert_eq!(extract_token_url("https://example.com/?token=x"), None);
+        // 真实输出行可能有前后缀文本，仍能提取本机带 token 的地址。
+        assert_eq!(
+            extract_token_url("dsh web: http://127.0.0.1:3080/?token=y (pid 123)"),
+            Some("http://127.0.0.1:3080/?token=y".to_string())
+        );
+        // 含 LAN 后缀时只取 loopback 的本机地址。
+        assert_eq!(
+            extract_token_url(
+                "dsh web: http://127.0.0.1:3080/?token=a (LAN: http://192.168.1.5:3080/?token=b)"
+            ),
+            Some("http://127.0.0.1:3080/?token=a".to_string())
+        );
+        // localhost 亦接受。
+        assert_eq!(
+            extract_token_url("dsh web: http://localhost:3080/?token=c"),
+            Some("http://localhost:3080/?token=c".to_string())
+        );
     }
 }

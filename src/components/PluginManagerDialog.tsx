@@ -231,7 +231,7 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       } finally {
         // 操作前停掉了 web，操作后自动恢复；不设置 startedByUs，避免自动打开 DSH Tab。
         if (wasRunning) {
-          api.startWeb(() => undefined).catch(() => undefined);
+          api.startWeb(null, () => undefined).catch(() => undefined);
         }
         setBusy(false);
         setBusyLabel(null);

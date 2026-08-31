@@ -18,6 +18,10 @@ pub const PREBUILT_PKG_API: &str =
     "https://api.github.com/repos/dsh-tauri-desk/deepseek-harness-pkg/releases/latest";
 pub const PREBUILT_PKG_ASSET: &str = "deepseek-harness-pkg-windows.zip";
 
+/// 预构建内核（模式二）全部 release 列表（供安装弹窗选择具体内核版本）。
+pub const PREBUILT_PKG_RELEASES_API: &str =
+    "https://api.github.com/repos/dsh-tauri-desk/deepseek-harness-pkg/releases";
+
 /// 预构建内核（模式二）解压到的子目录名（位于程序运行目录下）。
 pub const MODE2_DIR: &str = "dsh";
 
@@ -143,6 +147,249 @@ pub struct AppConfig {
     pub theme: String,
     /// 界面语言：auto（跟随系统，非中英默认英文）/ zh-CN / en。
     pub language: String,
+    /// 已安装的内核版本注册表（多版本相互独立，共享 ~/.dsh 数据目录）。
+    #[serde(default)]
+    pub installed_kernels: Vec<KernelInstall>,
+    /// 最近一次正常启动的内核 id（启动选择框的默认勾选项；首次为最新预构建内核）。
+    #[serde(default)]
+    pub last_started_kernel_id: Option<String>,
+}
+
+/// 一个已安装的 DSH 内核版本（预构建按版本独立目录，源码仅一份原地更新）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KernelInstall {
+    /// 唯一标识：prebuilt-<version>；源码模式固定为 "source"。
+    pub id: String,
+    /// 安装方式：source / prebuilt。
+    pub mode: String,
+    /// 版本号（预构建为归一化 tag，如 0.1.2-alpha.2；源码为 CLI 版本）。
+    pub version: String,
+    /// 安装目录（绝对路径；各版本相互独立）。
+    pub install_dir: String,
+    /// 源码模式取 commit；预构建为 None。
+    pub commit: Option<String>,
+    /// 安装时间。
+    pub installed_at: String,
+}
+
+impl Default for KernelInstall {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            mode: "prebuilt".to_string(),
+            version: String::new(),
+            install_dir: String::new(),
+            commit: None,
+            installed_at: String::new(),
+        }
+    }
+}
+
+// ─────────────────────────────── 内核注册表 ───────────────────────────────
+
+/// 内核唯一标识：源码固定为 "source"（仅一份原地更新），预构建为 `prebuilt-<version>`。
+pub fn kernel_id(mode: &str, version: &str) -> String {
+    if mode == "source" {
+        "source".to_string()
+    } else {
+        format!("prebuilt-{version}")
+    }
+}
+
+/// 净化版本号以用作目录组件：非 `[A-Za-z0-9._-]` 字符替换为 `-`，去掉首尾点/横线并截断。
+fn sanitize_dir_component(s: &str) -> String {
+    let t: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut out = t.trim_matches(|c| c == '.' || c == '-').to_string();
+    out.truncate(64);
+    if out.is_empty() {
+        out = "default".to_string();
+    }
+    out
+}
+
+/// 预构建内核某版本的安装目录：`<exe_dir>\dsh-<净化版本>`（与旧版单一 `dsh` 目录区分）。
+pub fn prebuilt_version_dir(version: &str) -> PathBuf {
+    exe_dir().join(format!("dsh-{}", sanitize_dir_component(version)))
+}
+
+/// 源码安装目录：`<exe_dir>\<repo 目录名>`（与旧版一致，仅一份）。
+pub fn source_install_dir() -> PathBuf {
+    exe_dir().join(repo_dir_name())
+}
+
+/// 依据安装方式与版本返回内核安装目录。
+pub fn kernel_install_dir(mode: &str, version: &str) -> PathBuf {
+    if mode == "source" {
+        source_install_dir()
+    } else {
+        prebuilt_version_dir(version)
+    }
+}
+
+/// 在注册表中按 id 查找内核。
+pub fn find_kernel(cfg: &AppConfig, id: &str) -> Option<KernelInstall> {
+    cfg.installed_kernels
+        .iter()
+        .find(|k| k.id == id)
+        .cloned()
+}
+
+/// 注册表中是否已有同 (mode, version) 的内核（用于「已安装」标识与修复安装判别）。
+#[allow(dead_code)]
+pub fn is_kernel_installed(cfg: &AppConfig, mode: &str, version: &str) -> bool {
+    if mode == "source" {
+        cfg.installed_kernels.iter().any(|k| k.mode == "source")
+    } else {
+        cfg.installed_kernels
+            .iter()
+            .any(|k| k.mode == "prebuilt" && k.version == version)
+    }
+}
+
+/// 最新（语义化版本最高）的预构建内核。
+pub fn latest_prebuilt_kernel(cfg: &AppConfig) -> Option<KernelInstall> {
+    let pre: Vec<&KernelInstall> = cfg
+        .installed_kernels
+        .iter()
+        .filter(|k| k.mode == "prebuilt")
+        .collect();
+    pre.into_iter()
+        .max_by(|a, b| compare_versions(&a.version, &b.version))
+        .cloned()
+}
+
+/// 版本比较：优先语义化比较，解析失败退化为字典序。
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(va), Ok(vb)) => va.cmp(&vb),
+        _ => a.cmp(b),
+    }
+}
+
+/// 将指定内核设为「活动内核」：同步镜像字段（install_dir/mode/version/commit）并记录为最近启动。
+pub fn set_active_kernel(cfg: &mut AppConfig, id: &str) {
+    if let Some(k) = cfg.installed_kernels.iter().find(|k| k.id == id) {
+        cfg.install_dir = Some(k.install_dir.clone());
+        cfg.install_mode = k.mode.clone();
+        cfg.installed_version = Some(k.version.clone());
+        cfg.installed_commit = k.commit.clone();
+        cfg.last_started_kernel_id = Some(k.id.clone());
+    }
+}
+
+/// 插入或覆盖一个内核记录（按 id）。
+pub fn upsert_kernel(cfg: &mut AppConfig, kernel: KernelInstall) {
+    if let Some(existing) = cfg.installed_kernels.iter_mut().find(|k| k.id == kernel.id) {
+        *existing = kernel;
+    } else {
+        cfg.installed_kernels.push(kernel);
+    }
+}
+
+/// 从注册表移除内核；若其为最近启动项则清空该记录。
+pub fn remove_kernel(cfg: &mut AppConfig, id: &str) {
+    cfg.installed_kernels.retain(|k| k.id != id);
+    if cfg.last_started_kernel_id.as_deref() == Some(id) {
+        cfg.last_started_kernel_id = None;
+    }
+}
+
+/// 解析当前活动内核：最近启动 id → 活动镜像（installDir 匹配） → 最新预构建 → 首条。
+pub fn resolve_active_kernel(cfg: &AppConfig) -> Option<KernelInstall> {
+    if let Some(id) = cfg.last_started_kernel_id.as_deref() {
+        if let Some(k) = cfg.installed_kernels.iter().find(|k| k.id == id) {
+            return Some(k.clone());
+        }
+    }
+    if let Some(dir) = cfg.install_dir.as_deref() {
+        if let Some(k) = cfg
+            .installed_kernels
+            .iter()
+            .find(|k| k.install_dir == dir)
+        {
+            return Some(k.clone());
+        }
+    }
+    latest_prebuilt_kernel(cfg).or_else(|| cfg.installed_kernels.first().cloned())
+}
+
+/// 迁移/补登：注册表为空但已安装过 → 以现有活动安装生成一条内核记录；已装但漏登 → 补登记。
+/// 幂等，仅在发生变更时改造 cfg。
+pub fn migrate_kernel_registry(cfg: &mut AppConfig) {
+    if cfg.installed_kernels.is_empty() {
+        if let Some(dir) = cfg.install_dir.as_ref() {
+            if !dir.trim().is_empty() {
+                let version = cfg
+                    .installed_version
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let kernel = KernelInstall {
+                    id: kernel_id(&cfg.install_mode, &version),
+                    mode: cfg.install_mode.clone(),
+                    version,
+                    install_dir: dir.clone(),
+                    commit: cfg.installed_commit.clone(),
+                    installed_at: cfg
+                        .last_updated_at
+                        .clone()
+                        .unwrap_or_else(now_string),
+                };
+                let kid = kernel.id.clone();
+                cfg.installed_kernels.push(kernel);
+                if cfg.last_started_kernel_id.is_none() {
+                    cfg.last_started_kernel_id = Some(kid);
+                }
+            }
+        }
+        return;
+    }
+    // 已装但漏登（例如手动 git pull 后配置被重置）。
+    if let Some(dir) = cfg.install_dir.as_ref() {
+        let exists = cfg
+            .installed_kernels
+            .iter()
+            .any(|k| k.install_dir == *dir);
+        if !exists {
+            let version = cfg
+                .installed_version
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let kernel = KernelInstall {
+                id: kernel_id(&cfg.install_mode, &version),
+                mode: cfg.install_mode.clone(),
+                version,
+                install_dir: dir.clone(),
+                commit: cfg.installed_commit.clone(),
+                installed_at: cfg
+                    .last_updated_at
+                    .clone()
+                    .unwrap_or_else(now_string),
+            };
+            let kid = kernel.id.clone();
+            cfg.installed_kernels.push(kernel);
+            if cfg.last_started_kernel_id.is_none() {
+                cfg.last_started_kernel_id = Some(kid);
+            }
+        }
+    }
+    // 活动镜像与注册表对齐：有内核但镜像为空（或指向已删内核）时，重算并同步。
+    if !cfg.installed_kernels.is_empty() {
+        if let Some(active) = resolve_active_kernel(cfg) {
+            if cfg.install_dir.as_deref() != Some(active.install_dir.as_str()) {
+                set_active_kernel(cfg, &active.id);
+            }
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -166,6 +413,8 @@ impl Default for AppConfig {
             open_ui_mode: "tab".to_string(),
             theme: "auto".to_string(),
             language: "auto".to_string(),
+            installed_kernels: Vec::new(),
+            last_started_kernel_id: None,
         }
     }
 }
@@ -232,6 +481,8 @@ pub fn load_config(app: &tauri::AppHandle) -> AppConfig {
     // 修正 install_mode：与磁盘现状保持一致（可能因手动处理或旧配置而不准）。
     let mut cfg = cfg;
     cfg.install_mode = infer_install_mode(cfg.install_dir.as_deref());
+    // 迁移/补登内核注册表（旧版单安装 → 内核记录；保持向后兼容）。
+    migrate_kernel_registry(&mut cfg);
     cfg
 }
 
@@ -322,5 +573,107 @@ mod tests {
         );
         assert_eq!(dir_name_from_url(""), "deepseek-harness");
         assert_eq!(dir_name_from_url("https://github.com/a/b.git"), "b");
+    }
+
+    fn sample_kernel(id: &str, mode: &str, version: &str, dir: &str) -> KernelInstall {
+        KernelInstall {
+            id: id.into(),
+            mode: mode.into(),
+            version: version.into(),
+            install_dir: dir.into(),
+            commit: None,
+            installed_at: "2026-08-31 21:43:55".into(),
+        }
+    }
+
+    #[test]
+    fn kernel_id_is_version_scoped_for_prebuilt_and_stable_for_source() {
+        assert_eq!(kernel_id("prebuilt", "0.1.2-alpha.2"), "prebuilt-0.1.2-alpha.2");
+        assert_eq!(kernel_id("source", "0.1.1-rc.2"), "source");
+    }
+
+    #[test]
+    fn prebuilt_version_dir_is_version_scoped() {
+        let d = prebuilt_version_dir("0.1.2-alpha.2");
+        let name = d.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(name, "dsh-0.1.2-alpha.2");
+        // 非法字符被净化。
+        let dd = prebuilt_version_dir("ab/c");
+        let n2 = dd.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(n2, "dsh-ab-c");
+        // 源码目录固定为仓库名。
+        let s = kernel_install_dir("source", "x");
+        assert!(s.to_string_lossy().ends_with(repo_dir_name().as_str()));
+    }
+
+    #[test]
+    fn upsert_find_and_remove_kernel_roundtrip() {
+        let mut cfg = AppConfig::default();
+        let k = sample_kernel("prebuilt-1", "prebuilt", "1.0.0", "D:\\dsh\\dsh-1.0.0");
+        upsert_kernel(&mut cfg, k.clone());
+        assert_eq!(cfg.installed_kernels.len(), 1);
+        assert_eq!(find_kernel(&cfg, "prebuilt-1"), Some(k.clone()));
+
+        // 同 id 覆盖。
+        let k2 = KernelInstall { installed_at: "x".into(), ..k.clone() };
+        upsert_kernel(&mut cfg, k2.clone());
+        assert_eq!(cfg.installed_kernels.len(), 1);
+        assert_eq!(cfg.installed_kernels[0].installed_at, "x");
+
+        remove_kernel(&mut cfg, "prebuilt-1");
+        assert!(cfg.installed_kernels.is_empty());
+    }
+
+    #[test]
+    fn set_active_kernel_syncs_mirror_fields() {
+        let mut cfg = AppConfig::default();
+        cfg.installed_kernels.push(sample_kernel("prebuilt-a", "prebuilt", "2.0.0", "D:\\dsh\\dsh-2.0.0"));
+        cfg.installed_kernels.push(sample_kernel("source", "source", "1.0.0", "D:\\deepseek-harness"));
+        set_active_kernel(&mut cfg, "source");
+        assert_eq!(cfg.install_mode, "source");
+        assert_eq!(cfg.install_dir.as_deref(), Some("D:\\deepseek-harness"));
+        assert_eq!(cfg.installed_version.as_deref(), Some("1.0.0"));
+        assert_eq!(cfg.last_started_kernel_id.as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn is_kernel_installed_matches_mode_and_version() {
+        let mut cfg = AppConfig::default();
+        cfg.installed_kernels
+            .push(sample_kernel("prebuilt-0.1.2-alpha.2", "prebuilt", "0.1.2-alpha.2", "D:\\dsh"));
+        assert!(is_kernel_installed(&cfg, "prebuilt", "0.1.2-alpha.2"));
+        assert!(!is_kernel_installed(&cfg, "prebuilt", "0.1.1"));
+        // 源码：只要有一条 source 即视为已装。
+        cfg.installed_kernels.push(sample_kernel("source", "source", "0.1.1-rc.2", "D:\\repo"));
+        assert!(is_kernel_installed(&cfg, "source", "0.1.1-rc.2"));
+    }
+
+    #[test]
+    fn latest_prebuilt_kernel_picks_highest_semver() {
+        let mut cfg = AppConfig::default();
+        cfg.installed_kernels
+            .push(sample_kernel("prebuilt-0.1.0", "prebuilt", "0.1.0", "D:\\a"));
+        cfg.installed_kernels
+            .push(sample_kernel("prebuilt-0.1.2-alpha.2", "prebuilt", "0.1.2-alpha.2", "D:\\b"));
+        cfg.installed_kernels
+            .push(sample_kernel("prebuilt-0.1.11", "prebuilt", "0.1.11", "D:\\c"));
+        let latest = latest_prebuilt_kernel(&cfg).unwrap();
+        assert_eq!(latest.version, "0.1.11");
+    }
+
+    #[test]
+    fn migrate_registry_from_single_install() {
+        let mut cfg = AppConfig {
+            install_dir: Some("D:\\dsh".into()),
+            install_mode: "prebuilt".into(),
+            installed_version: Some("0.1.2-alpha.2".into()),
+            last_updated_at: Some("2026-08-31".into()),
+            ..Default::default()
+        };
+        migrate_kernel_registry(&mut cfg);
+        assert_eq!(cfg.installed_kernels.len(), 1);
+        assert_eq!(cfg.installed_kernels[0].id, "prebuilt-0.1.2-alpha.2");
+        assert_eq!(cfg.installed_kernels[0].install_dir, "D:\\dsh");
+        assert_eq!(cfg.last_started_kernel_id.as_deref(), Some("prebuilt-0.1.2-alpha.2"));
     }
 }

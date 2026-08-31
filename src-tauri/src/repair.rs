@@ -360,18 +360,34 @@ fn reinstall(
 
 // ─────────────────────────────── 入口 ───────────────────────────────
 
-/// 修复安装主流程（按安装方式分派，见模块文档）。
+/// 修复安装主流程（按安装方式分派，见模块文档）。`kernel_id` 指定要修复的内核；
+/// `None` 时修复当前活动内核。修复前将该内核设为活动内核（profile 依赖修复据此取目录）。
 pub fn repair(
     app: &AppHandle,
+    kernel_id: Option<String>,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
-    let cfg = config::load_config(app);
-    let mode = cfg.install_mode.clone();
-    let dir = cfg
-        .install_dir
-        .clone()
-        .ok_or_else(|| AppError::NotInstalled.friendly())?;
+    let mut cfg = config::load_config(app);
+    let (mode, dir) = match kernel_id.as_deref() {
+        Some(id) => {
+            let k = config::find_kernel(&cfg, id)
+                .ok_or_else(|| AppError::NotInstalled.friendly())?;
+            (k.mode.clone(), k.install_dir.clone())
+        }
+        None => (
+            cfg.install_mode.clone(),
+            cfg
+                .install_dir
+                .clone()
+                .ok_or_else(|| AppError::NotInstalled.friendly())?,
+        ),
+    };
+    // 设为活动内核，使 profile 依赖修复等按被修复内核的目录执行。
+    if let Some(id) = kernel_id.as_deref() {
+        config::set_active_kernel(&mut cfg, id);
+        let _ = config::save_config(app, &cfg);
+    }
     let path = PathBuf::from(&dir);
 
     if mode == "source" {
@@ -383,24 +399,24 @@ pub fn repair(
         if !crate::detect::is_valid_prebuilt(&path) {
             return Err(AppError::NotInstalled.friendly());
         }
-        repair_prebuilt(app, channel, logger)?;
+        repair_prebuilt(app, &dir, &path, kernel_id.as_deref(), channel, logger)?;
     }
 
     // L4：profile 依赖修复（best-effort，不阻断主流程；两模式共用）。
     repair_profiles(app, channel, logger);
 
-    // 收尾：更新配置。
+    // 收尾：更新配置（保持被修复内核为活动内核）。
     let mut cfg = config::load_config(app);
     if mode == "source" {
         cfg.installed_version = crate::detect::read_version(&path);
         cfg.installed_commit = crate::version::read_commit(&path);
     } else {
-        // 预构建内核：重新定位 dsh 根并读取版本。
-        if let Ok(root) = crate::prebuilt::locate_dsh_root(&config::mode2_install_dir()) {
-            cfg.install_dir = Some(root.to_string_lossy().to_string());
-            cfg.installed_version = crate::detect::read_pkg_version(&root);
-        }
+        cfg.install_dir = Some(dir.clone());
+        cfg.installed_version = crate::detect::read_pkg_version(&path);
         cfg.installed_commit = None;
+    }
+    if let Some(id) = kernel_id.as_deref() {
+        cfg.last_started_kernel_id = Some(id.to_string());
     }
     cfg.last_updated_at = Some(config::now_string());
     cfg.update_available = false;
@@ -463,22 +479,34 @@ fn repair_source(
     Ok(())
 }
 
-/// 预构建模式修复：停 web → 清理残留进程 → 重新下载最新内核并解压。
+/// 预构建模式修复：停 web → 清理残留进程 → 重新下载并解压【该版本】内核到其独立目录。
+/// `kernel_id` 为被修复内核的 id（据此定位版本与目录）；`dir`/`path` 为该内核安装目录。
 fn repair_prebuilt(
     app: &AppHandle,
+    dir: &str,
+    path: &Path,
+    kernel_id: Option<&str>,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
-    let dir = config::mode2_install_dir().to_string_lossy().to_string();
     logger.info(&crate::i18n::t("log.repair_start"));
     let _ = crate::web::stop_web(app);
-    kill_stray_processes(&dir, logger);
+    kill_stray_processes(dir, logger);
+
+    // 确定要重新下载的版本：优先按内核记录版本；无法识别则按安装目录推导。
+    let version = kernel_id
+        .and_then(|id| {
+            let cfg = config::load_config(app);
+            config::find_kernel(&cfg, id).map(|k| k.version)
+        })
+        .or_else(|| crate::detect::read_pkg_version(path))
+        .unwrap_or_else(|| "unknown".to_string());
+    let release = crate::prebuilt::release_by_version(&version).map_err(|e| e.friendly())?;
 
     let _ = channel.send(PipelineEvent::StepStarted {
         id: "download".into(),
         title: crate::i18n::t("step.download"),
     });
-    let release = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
     let tmp = std::env::temp_dir().join("dsh-prebuilt-repair.zip");
     crate::prebuilt::download_asset(&release.url, &tmp, release.size, channel, "download")
         .map_err(|e| e.friendly())?;
@@ -491,7 +519,7 @@ fn repair_prebuilt(
         id: "extract".into(),
         title: crate::i18n::t("step.extract"),
     });
-    crate::prebuilt::extract_zip_with_progress(&tmp, &config::mode2_install_dir(), channel, "extract")
+    crate::prebuilt::extract_zip_with_progress(&tmp, Path::new(dir), channel, "extract")
         .map_err(|e| e.friendly())?;
     let _ = channel.send(PipelineEvent::StepFinished {
         id: "extract".into(),
@@ -499,7 +527,7 @@ fn repair_prebuilt(
     });
 
     // 解压完整性校验：关键入口缺失说明解压不完整，删除损坏目录并报错。
-    let dest = config::mode2_install_dir();
+    let dest = PathBuf::from(dir);
     if let Ok(root) = crate::prebuilt::locate_dsh_root(&dest) {
         if let Err(e) = crate::prebuilt::verify_prebuilt_root(&root) {
             let _ = std::fs::remove_dir_all(&dest);

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use tauri::ipc::Channel;
 use tauri::AppHandle;
 
-use crate::config::{self, mode2_install_dir};
+use crate::config::{self};
 use crate::detect::{is_valid_prebuilt, is_valid_repo, read_pkg_version, read_version};
 use crate::error::AppError;
 use crate::logging::Logger;
@@ -16,6 +16,8 @@ use crate::process::{run_pipeline, PipelineEvent, Step};
 use crate::version::read_commit;
 
 /// 更新已安装的 DeepSeek Harness。要求：已安装；web 服务若在运行会先自动停止。
+/// 预构建模式把最新发布版作为新版本内核安装并设为活动内核（旧版本保留，可切换/卸载）；
+/// 源码模式原地更新并刷新对应内核记录。
 pub fn update(
     app: &AppHandle,
     channel: &Channel<PipelineEvent>,
@@ -106,13 +108,30 @@ fn update_source(
     cfg.update_available = false;
     cfg.latest_commit = None;
     cfg.latest_subject = None;
+    // 刷新源码内核记录（同 id 覆盖），并保持为活动内核。
+    let version = cfg.installed_version.clone().unwrap_or_else(|| "unknown".to_string());
+    let id = config::kernel_id("source", &version);
+    let install_dir = cfg.install_dir.clone().unwrap_or_default();
+    let commit = cfg.installed_commit.clone();
+    config::upsert_kernel(
+        &mut cfg,
+        config::KernelInstall {
+            id: id.clone(),
+            mode: "source".to_string(),
+            version,
+            install_dir,
+            commit,
+            installed_at: config::now_string(),
+        },
+    );
+    config::set_active_kernel(&mut cfg, &id);
     config::save_config(app, &cfg).map_err(|e| e)?;
 
     logger.info(&crate::i18n::t("log.update_done"));
     Ok(())
 }
 
-/// 预构建更新：下载最新 release zip → 重新解压到 dsh 子目录。
+/// 预构建更新：下载最新 release zip → 解压到该版本独立目录，并作为新内核激活。
 fn update_prebuilt(
     app: &AppHandle,
     channel: &Channel<PipelineEvent>,
@@ -130,6 +149,8 @@ fn update_prebuilt(
     logger.info(&crate::i18n::t("log.prebuilt_update_start"));
 
     let release = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
+    let norm = crate::version::normalized_tag_version(&release.tag);
+    let dest = config::prebuilt_version_dir(&norm);
     let tmp = std::env::temp_dir().join("dsh-prebuilt-update.zip");
     crate::prebuilt::download_asset(&release.url, &tmp, release.size, channel, "download")
         .map_err(|e| e.friendly())?;
@@ -142,7 +163,6 @@ fn update_prebuilt(
         id: "extract".into(),
         title: crate::i18n::t("step.extract"),
     });
-    let dest = mode2_install_dir();
     crate::prebuilt::extract_zip_with_progress(&tmp, &dest, channel, "extract")
         .map_err(|e| e.friendly())?;
     let _ = channel.send(PipelineEvent::StepFinished {
@@ -157,7 +177,7 @@ fn update_prebuilt(
         return Err(e.friendly());
     }
     let root_str = root.to_string_lossy().to_string();
-    let version = read_pkg_version(&root).unwrap_or(release.tag.clone());
+    let version = read_pkg_version(&root).unwrap_or_else(|| norm.clone());
 
     // profile bundle 校准：移除其它发行版残留的、当前内核无法解析的 bundle。
     for (profile, removed) in crate::plugin::reconcile_all_profiles(&root) {
@@ -170,14 +190,28 @@ fn update_prebuilt(
     }
 
     let mut cfg = config::load_config(app);
-    cfg.install_dir = Some(root_str);
+    cfg.install_dir = Some(root_str.clone());
     cfg.install_mode = "prebuilt".to_string();
-    cfg.installed_version = Some(version);
+    cfg.installed_version = Some(version.clone());
     cfg.installed_commit = None;
     cfg.last_updated_at = Some(config::now_string());
     cfg.update_available = false;
     cfg.latest_commit = None;
     cfg.latest_subject = None;
+    // 以最新发布版作为新内核登记并激活（旧版本保留在注册表，可切换/卸载）。
+    let kernel_id = config::kernel_id("prebuilt", &version);
+    config::upsert_kernel(
+        &mut cfg,
+        config::KernelInstall {
+            id: kernel_id.clone(),
+            mode: "prebuilt".to_string(),
+            version: version.clone(),
+            install_dir: root_str.clone(),
+            commit: None,
+            installed_at: config::now_string(),
+        },
+    );
+    config::set_active_kernel(&mut cfg, &kernel_id);
     config::save_config(app, &cfg).map_err(|e| e)?;
 
     let _ = channel.send(PipelineEvent::Finished { ok: true });

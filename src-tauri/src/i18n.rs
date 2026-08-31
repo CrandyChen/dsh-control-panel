@@ -47,6 +47,28 @@ pub fn lang_from_config(s: &str) -> Lang {
 /// 后端文案目录：返回 (中文, English)。未知 key 返回 None（由调用方原样透出）。
 fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
     Some(match key {
+        // ── web 启动 / 认证 ──
+        "log.web_url_captured" => (
+            "已捕获 DSH web 访问地址（含 token）",
+            "Captured the DSH web URL (with token)",
+        ),
+        "log.web_auth_required" => (
+            "DSH web 需要浏览器会话认证，等待其输出带 token 的访问地址…",
+            "DSH web requires browser-session auth; waiting for the token URL…",
+        ),
+        "log.web_ready_auth" => (
+            "已获取带 token 的访问地址，DSH web 就绪",
+            "Token URL ready; DSH web is up",
+        ),
+        // ── 内核条目展示（卸载清单 / 卸载进度） ──
+        "kernel.display.prebuilt" => (
+            "预构建内核安装 - {0}",
+            "Prebuilt kernel install - {0}",
+        ),
+        "kernel.display.source" => (
+            "源码安装 - {0}",
+            "Source install - {0}",
+        ),
         // ── 插件管理 ──
         "plugin.running" => (
             "web 服务正在运行，请先停止服务后再更新/卸载插件；安装新插件不受限制",

@@ -11,6 +11,7 @@ import type {
   PluginList,
   PluginOpResult,
   PluginUpdates,
+  PrebuiltRelease,
   ToolStatus,
   UninstallPreview,
   UpdateCheckResult,
@@ -34,19 +35,22 @@ export const api = {
   detectState: () => invoke<DetectResult>("detect_state"),
   detectTools: () => invoke<ToolStatus[]>("detect_tools"),
   getBalance: () => invoke<BalanceResult>("get_balance"),
-  install: (mode: string, onEvent: (e: PipelineEvent) => void) =>
-    runPipeline("install", { mode }, onEvent),
+  install: (mode: string, version: string | null, onEvent: (e: PipelineEvent) => void) =>
+    runPipeline("install", { mode, version }, onEvent),
+  listPrebuiltReleases: () => invoke<PrebuiltRelease[]>("list_prebuilt_releases"),
   checkForUpdates: () => invoke<UpdateCheckResult>("check_for_updates"),
   update: (onEvent: (e: PipelineEvent) => void) => runPipeline("update", {}, onEvent),
-  repairInstall: (onEvent: (e: PipelineEvent) => void) =>
-    runPipeline("repair_install", {}, onEvent),
+  repairInstall: (kernelId: string | null, onEvent: (e: PipelineEvent) => void) =>
+    runPipeline("repair_install", { kernelId }, onEvent),
   uninstallPreview: (onEvent: (e: PipelineEvent) => void) =>
     runPipeline<UninstallPreview>("uninstall_preview", {}, onEvent),
   cancelUninstallPreview: () => invoke<void>("cancel_uninstall_preview"),
   uninstall: (selected: string[], onEvent: (e: PipelineEvent) => void) =>
     runPipeline("uninstall", { selected }, onEvent),
-  startWeb: (onEvent: (e: PipelineEvent) => void) => runPipeline("start_web", {}, onEvent),
+  startWeb: (kernelId: string | null, onEvent: (e: PipelineEvent) => void) =>
+    runPipeline("start_web", { kernelId }, onEvent),
   stopWeb: () => invoke<void>("stop_web"),
+  getWebUrl: () => invoke<string>("get_web_url"),
   openTerminal: () => invoke<void>("open_terminal"),
   openWebUi: () => invoke<void>("open_web_ui"),
   openExternal: (url: string) => invoke<void>("open_external", { url }),

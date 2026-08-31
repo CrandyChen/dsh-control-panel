@@ -112,6 +112,7 @@ fn walk(
 
 /// 统计路径大小与条目数（不跟随符号链接；限制深度与条目数防止卡死）。
 /// 纯函数版本（无进度 / 取消），供测试与内部复用。
+#[allow(dead_code)]
 pub fn stat_path(p: &Path) -> (u64, u64) {
     let mut size = 0;
     let mut items = 0;
@@ -152,26 +153,38 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{v:.1} {}", units[i])
 }
 
-/// 生成卸载预览清单条目：安装目录（整棵）+ DSH 用户数据目录（整棵），各为一项。
-/// 目录不存在时对应条目省略；返回值纯函数，便于测试。
-pub fn build_preview_entries(install_dir: Option<&str>, dsh_home: &str) -> Vec<UninstallEntry> {
-    let mut entries = Vec::new();
+/// 内核条目的展示名称（注明安装方式与版本，按界面语言输出）。
+pub fn kernel_display_name(mode: &str, version: &str) -> String {
+    let key = if mode == "source" {
+        "kernel.display.source"
+    } else {
+        "kernel.display.prebuilt"
+    };
+    crate::i18n::t_fmt(key, &[version])
+}
 
-    if let Some(dir) = install_dir {
-        let p = Path::new(dir);
+/// 生成卸载预览清单条目：每个已安装内核版本目录各一项 + DSH 用户数据目录一项。
+/// 目录不存在时对应条目省略；返回值纯函数，便于测试。
+#[allow(dead_code)]
+pub fn build_preview_entries(
+    kernels: &[config::KernelInstall],
+    dsh_home: &str,
+) -> Vec<UninstallEntry> {
+    let mut entries = Vec::new();
+    for k in kernels {
+        let p = Path::new(&k.install_dir);
         if p.exists() {
             let (size, items) = stat_path(p);
             entries.push(UninstallEntry {
-                id: "install".into(),
-                name: format!("DeepSeek Harness 安装目录（{dir}）"),
-                path: dir.to_string(),
+                id: k.id.clone(),
+                name: kernel_display_name(&k.mode, &k.version),
+                path: k.install_dir.clone(),
                 kind: "directory".into(),
                 size,
                 items,
             });
         }
     }
-
     let hp = Path::new(dsh_home);
     if hp.exists() {
         let (size, items) = stat_path(hp);
@@ -184,17 +197,16 @@ pub fn build_preview_entries(install_dir: Option<&str>, dsh_home: &str) -> Vec<U
             items,
         });
     }
-
     entries
 }
 
 /// 快速列出卸载候选路径（仅存在性检查，不做统计），供删除前校验清单来源，
 /// 避免删除时对超大目录做二次全量统计。
-pub fn list_preview_paths(install_dir: Option<&str>, dsh_home: &str) -> Vec<String> {
+pub fn list_preview_paths(kernels: &[config::KernelInstall], dsh_home: &str) -> Vec<String> {
     let mut v = Vec::new();
-    if let Some(dir) = install_dir {
-        if Path::new(dir).exists() {
-            v.push(dir.to_string());
+    for k in kernels {
+        if Path::new(&k.install_dir).exists() {
+            v.push(k.install_dir.clone());
         }
     }
     if Path::new(dsh_home).exists() {
@@ -205,26 +217,22 @@ pub fn list_preview_paths(install_dir: Option<&str>, dsh_home: &str) -> Vec<Stri
 
 /// 带进度上报与取消的清单构建（卸载预览用）。取消时返回 Err。
 fn build_preview_entries_progress(
-    install_dir: Option<&str>,
+    kernels: &[config::KernelInstall],
     dsh_home: &str,
     channel: &Channel<PipelineEvent>,
     cancel: &AtomicBool,
 ) -> Result<Vec<UninstallEntry>, String> {
     let mut entries = Vec::new();
 
-    if let Some(dir) = install_dir {
-        let p = Path::new(dir);
+    for k in kernels {
+        let p = Path::new(&k.install_dir);
         if p.exists() {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| dir.to_string());
-            let label = format!("{name}（{dir}）");
+            let label = format!("{}（{}）", kernel_display_name(&k.mode, &k.version), k.install_dir);
             let (size, items) = stat_path_progress(p, &label, channel, cancel)?;
             entries.push(UninstallEntry {
-                id: "install".into(),
-                name: format!("DeepSeek Harness 安装目录（{dir}）"),
-                path: dir.to_string(),
+                id: k.id.clone(),
+                name: kernel_display_name(&k.mode, &k.version),
+                path: k.install_dir.clone(),
                 kind: "directory".into(),
                 size,
                 items,
@@ -249,7 +257,7 @@ fn build_preview_entries_progress(
     Ok(entries)
 }
 
-/// 生成卸载预览清单（带进度上报与取消）：安装目录 + DSH 用户数据目录。
+/// 生成卸载预览清单（带进度上报与取消）：所有已安装内核版本目录 + DSH 用户数据目录。
 /// 取消时返回 Err（前端按取消静默处理）。
 pub fn build_preview(
     app: &AppHandle,
@@ -258,7 +266,8 @@ pub fn build_preview(
 ) -> Result<UninstallPreview, String> {
     let cfg = config::load_config(app);
     let home = dsh_home();
-    let entries = build_preview_entries_progress(cfg.install_dir.as_deref(), &home, channel, cancel)?;
+    let entries =
+        build_preview_entries_progress(&cfg.installed_kernels, &home, channel, cancel)?;
     Ok(UninstallPreview {
         entries,
         install_dir: cfg.install_dir.clone(),
@@ -287,6 +296,7 @@ pub fn is_forbidden_path(p: &Path) -> bool {
 }
 
 /// 执行卸载：校验每个路径都在预览清单内且安全，然后逐条删除。
+/// 删除内核版本目录后从注册表移除对应记录，并重算活动内核。
 pub fn uninstall(
     app: &AppHandle,
     selected: Vec<String>,
@@ -300,7 +310,7 @@ pub fn uninstall(
     let home = dsh_home();
     // 仅校验路径是否在预览清单内（存在性检查，不做全量统计）。
     let allowed: HashSet<String> =
-        list_preview_paths(cfg.install_dir.as_deref(), &home).into_iter().collect();
+        list_preview_paths(&cfg.installed_kernels, &home).into_iter().collect();
 
     for sel in &selected {
         if !allowed.contains(sel) {
@@ -350,13 +360,31 @@ pub fn uninstall(
     let _ = channel.send(PipelineEvent::Finished { ok: true });
 
     let mut cfg = config::load_config(app);
-    cfg.install_dir = None;
-    cfg.installed_version = None;
-    cfg.installed_commit = None;
-    cfg.last_updated_at = None;
-    cfg.update_available = false;
-    cfg.latest_commit = None;
-    cfg.latest_subject = None;
+    // 从注册表移除所有被删除的内核目录记录。
+    let mut removed_kernel_dir: Option<String> = None;
+    for k in cfg.installed_kernels.clone() {
+        if selected.iter().any(|s| s == &k.install_dir) {
+            if removed_kernel_dir.is_none() {
+                removed_kernel_dir = Some(k.install_dir.clone());
+            }
+            config::remove_kernel(&mut cfg, &k.id);
+        }
+    }
+    // 若卸载的是内核目录（且非共享数据目录），清空活动镜像字段。
+    if let Some(dir) = removed_kernel_dir {
+        if cfg.install_dir.as_deref() == Some(dir.as_str()) {
+            cfg.install_dir = None;
+            cfg.installed_version = None;
+            cfg.installed_commit = None;
+        }
+        cfg.update_available = false;
+        cfg.latest_commit = None;
+        cfg.latest_subject = None;
+    }
+    // 重算活动内核：仍有其它内核时切到最近启动/最新预构建；否则保持空。
+    if let Some(active) = config::resolve_active_kernel(&cfg) {
+        config::set_active_kernel(&mut cfg, &active.id);
+    }
     config::save_config(app, &cfg).map_err(|e| e)?;
 
     logger.info(&crate::i18n::t("log.uninstall_done"));
@@ -421,33 +449,46 @@ mod tests {
         let base = std::env::temp_dir().join(format!("dsh-paths-{}", std::process::id()));
         let a = base.join("a");
         std::fs::create_dir_all(&a).unwrap();
-        let v = list_preview_paths(Some(a.to_string_lossy().as_ref()), "Z:\\nope-xyz");
+        let kernels = [config::KernelInstall {
+            id: "prebuilt-1".into(),
+            mode: "prebuilt".into(),
+            version: "1.0.0".into(),
+            install_dir: a.to_string_lossy().to_string(),
+            commit: None,
+            installed_at: String::new(),
+        }];
+        let v = list_preview_paths(&kernels, "Z:\\nope-xyz");
         assert_eq!(v, vec![a.to_string_lossy().to_string()]);
         // 不存在的路径省略。
-        let none = list_preview_paths(Some("Z:\\definitely-not-exist-xyz"), "Z:\\no-dsh-xyz");
+        let none = list_preview_paths(&[], "Z:\\no-dsh-xyz");
         assert!(none.is_empty());
         std::fs::remove_dir_all(&base).ok();
     }
 
-    // ---------- 卸载清单颗粒度（粗粒度：安装目录 + 用户数据目录各一项） ----------
+    // ---------- 卸载清单颗粒度（每个内核版本目录一项 + 用户数据目录一项） ----------
 
     #[test]
-    fn preview_lists_install_dir_and_dsh_home_as_two_entries() {
+    fn preview_lists_kernels_and_dsh_home_as_entries() {
         let base = std::env::temp_dir().join(format!("dsh-uninstall-{}", std::process::id()));
-        let install = base.join("deepseek-harness");
+        let install = base.join("dsh-0.1.2-alpha.2");
         let home = base.join(".dsh");
-        std::fs::create_dir_all(install.join("apps/web")).unwrap();
+        std::fs::create_dir_all(install.join("node_modules/.bin")).unwrap();
         std::fs::create_dir_all(home.join("profiles/web")).unwrap();
-        std::fs::write(install.join("package.json"), "{}").unwrap();
+        std::fs::write(install.join("node_modules/.bin/dsh.cmd"), "@echo off").unwrap();
         std::fs::write(home.join("profiles/web/package.json"), "{}").unwrap();
 
-        let entries = build_preview_entries(
-            Some(install.to_string_lossy().as_ref()),
-            &home.to_string_lossy(),
-        );
-        assert_eq!(entries.len(), 2, "应只有安装目录与用户数据目录两项");
-        assert_eq!(entries[0].id, "install");
-        assert!(entries[0].path.contains("deepseek-harness"));
+        let kernels = [config::KernelInstall {
+            id: "prebuilt-0.1.2-alpha.2".into(),
+            mode: "prebuilt".into(),
+            version: "0.1.2-alpha.2".into(),
+            install_dir: install.to_string_lossy().to_string(),
+            commit: None,
+            installed_at: String::new(),
+        }];
+        let entries = build_preview_entries(&kernels, &home.to_string_lossy());
+        assert_eq!(entries.len(), 2, "应只有内核版本目录与用户数据目录两项");
+        assert_eq!(entries[0].id, "prebuilt-0.1.2-alpha.2");
+        assert!(entries[0].path.contains("dsh-0.1.2-alpha.2"));
         assert_eq!(entries[1].id, "dsh-home");
         assert!(entries[1].path.ends_with(".dsh"));
 
@@ -457,24 +498,36 @@ mod tests {
     #[test]
     fn preview_omits_missing_paths() {
         let base = std::env::temp_dir().join(format!("dsh-uninstall2-{}", std::process::id()));
-        let install = base.join("deepseek-harness");
+        let install = base.join("dsh-0.1.0");
         std::fs::create_dir_all(&install).unwrap();
 
-        // 用户数据目录不存在：只剩安装目录一项。
-        let entries = build_preview_entries(
-            Some(install.to_string_lossy().as_ref()),
-            &base.join(".dsh").to_string_lossy(),
-        );
+        // 用户数据目录不存在：只剩内核版本目录一项。
+        let kernels = [config::KernelInstall {
+            id: "prebuilt-0.1.0".into(),
+            mode: "prebuilt".into(),
+            version: "0.1.0".into(),
+            install_dir: install.to_string_lossy().to_string(),
+            commit: None,
+            installed_at: String::new(),
+        }];
+        let entries = build_preview_entries(&kernels, &base.join(".dsh").to_string_lossy());
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, "install");
+        assert_eq!(entries[0].id, "prebuilt-0.1.0");
 
         // 两者都不存在：空清单。
-        let none = build_preview_entries(
-            Some("Z:\\definitely-not-exist-xyz"),
-            "Z:\\no-dsh-xyz",
-        );
+        let none = build_preview_entries(&[], "Z:\\no-dsh-xyz");
         assert!(none.is_empty());
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn kernel_display_name_notes_mode_and_version() {
+        crate::i18n::set_lang(crate::i18n::Lang::Zh);
+        assert_eq!(
+            kernel_display_name("prebuilt", "0.1.2-alpha.2"),
+            "预构建内核安装 - 0.1.2-alpha.2"
+        );
+        assert_eq!(kernel_display_name("source", "0.1.1-rc.2"), "源码安装 - 0.1.1-rc.2");
     }
 }
