@@ -1,7 +1,7 @@
 // 前后端共享常量。
 
 /** 控制面板自身版本（与 package.json / Cargo.toml / tauri.conf.json 保持同步）。 */
-export const APP_VERSION = "2.3.0";
+export const APP_VERSION = "2.4.0";
 
 /** DeepSeek Harness Web UI 地址（与 Rust config::WEB_URL 同步）。 */
 export const WEB_URL = "http://127.0.0.1:3080";
