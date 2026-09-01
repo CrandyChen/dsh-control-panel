@@ -63,13 +63,13 @@ Click "Install" and choose an install mode:
 ## Screenshots
 
 Main UI
- ![Main UI](assets/main.png)
+ ![Main UI](assets/main-en.png)
 
 Web page
  ![Web page](assets/web-en.png)
 
 Plugin Management
- ![Plugin Management](assets/plugin.png)
+ ![Plugin Management](assets/plugin-en.png)
 
 ## Download & Install
 
