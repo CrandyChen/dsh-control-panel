@@ -95,7 +95,8 @@ impl Logger {
         }
     }
 
-    pub fn log(&self, level: &str, msg: &str) {
+    /// 把一行写入当日日志文件（不推送前端事件），返回生成的时间戳。
+    fn write_file(&self, level: &str, msg: &str) -> String {
         let ts = crate::config::now_string();
         let line = format!("[{ts}] [{level}] {msg}");
         if let Ok(mut guard) = self.inner.lock() {
@@ -104,10 +105,26 @@ impl Logger {
                 let _ = f.flush();
             }
         }
+        ts
+    }
+
+    pub fn log(&self, level: &str, msg: &str) {
+        let ts = self.write_file(level, msg);
         let _ = self.app.emit(
             "log-line",
             serde_json::json!({ "level": level, "text": msg, "ts": ts }),
         );
+    }
+
+    /// 只写入日志文件，不推送前端 `log-line` 事件：
+    /// 用于已被前端 `StepStarted`/`StepFinished` 步骤事件展示的起止标记，
+    /// 避免同一进度在日志面板重复出现，同时保留完整磁盘日志。
+    pub fn file_only(&self, level: &str, msg: &str) {
+        let _ = self.write_file(level, msg);
+    }
+
+    pub fn file_only_info(&self, msg: &str) {
+        self.file_only("INFO", msg);
     }
 
     pub fn info(&self, msg: &str) {

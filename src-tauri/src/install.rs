@@ -154,7 +154,7 @@ fn install_prebuilt(
         id: "download".into(),
         title: crate::i18n::t("step.download"),
     });
-    logger.info(&crate::i18n::t("log.prebuilt_start"));
+    logger.file_only_info(&crate::i18n::t("log.prebuilt_start"));
 
     // 并行下载运行环境（node/pnpm），与内核下载互不阻塞。
     let ch2 = channel.clone();

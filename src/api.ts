@@ -12,6 +12,7 @@ import type {
   PluginOpResult,
   PluginUpdates,
   PrebuiltRelease,
+  Rect,
   ToolStatus,
   UninstallPreview,
   UpdateCheckResult,
@@ -32,6 +33,8 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (cfg: AppConfig) => invoke<void>("save_config", { cfg }),
   getDefaultParentDir: () => invoke<string>("default_parent_dir"),
+  /** 同步原生窗口主题（标题栏深/浅色跟随软件主题）："dark" | "light" | "auto"。 */
+  setWindowTheme: (theme: string) => invoke<void>("set_window_theme", { theme }),
   detectState: () => invoke<DetectResult>("detect_state"),
   detectTools: () => invoke<ToolStatus[]>("detect_tools"),
   getBalance: () => invoke<BalanceResult>("get_balance"),
@@ -54,6 +57,17 @@ export const api = {
   openTerminal: () => invoke<void>("open_terminal"),
   openWebUi: () => invoke<void>("open_web_ui"),
   openExternal: (url: string) => invoke<void>("open_external", { url }),
+  /** 程序内原生内嵌 Webview（承载 DSH 界面；坐标为逻辑像素，相对主窗口客户区）。 */
+  webviewEmbed: {
+    create: (url: string, rect: Rect) =>
+      invoke<void>("embed_webview_create", { url, x: rect.x, y: rect.y, width: rect.width, height: rect.height }),
+    navigate: (url: string) => invoke<void>("embed_webview_navigate", { url }),
+    reposition: (rect: Rect) =>
+      invoke<void>("embed_webview_reposition", { x: rect.x, y: rect.y, width: rect.width, height: rect.height }),
+    show: () => invoke<void>("embed_webview_show"),
+    hide: () => invoke<void>("embed_webview_hide"),
+    close: () => invoke<void>("embed_webview_close"),
+  },
   getLogs: () => invoke<string[]>("get_logs"),
   getLogDir: () => invoke<string>("get_log_dir"),
   clearLogs: () => invoke<void>("clear_logs"),

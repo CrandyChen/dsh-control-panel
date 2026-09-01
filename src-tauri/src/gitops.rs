@@ -8,18 +8,33 @@
 //! 网络错误在调用前一般已由 `net::ensure_repo_reachable` 预检，此处错误多为 git 层级问题。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use git2::build::RepoBuilder;
 use git2::{Direction, FetchOptions, RemoteCallbacks, Repository, ResetType, StatusOptions};
 use tauri::ipc::Channel;
 
+use crate::detect::is_valid_repo;
 use crate::error::AppError;
 use crate::process::PipelineEvent;
 
 /// GitHub 网络操作（clone / fetch / ls-remote）的最大尝试次数（国内常抽筋，多试几次）。
-const GIT_NET_RETRY: u32 = 3;
+const GIT_NET_RETRY: u32 = 5;
 /// 每次失败后的等待（毫秒），随尝试次数递增。
 const GIT_NET_RETRY_DELAY_BASE_MS: u64 = 1200;
+/// 克隆「连接阶段」无任何进度可等待的上限（毫秒）：超过则视为网络卡住。
+const CLONE_CONNECT_TIMEOUT_MS: u64 = 90_000;
+/// 克隆「传输阶段」无进度可等待的上限（毫秒）。
+///
+/// Windows 上 libgit2 的 HTTP 走 WinHTTP，其接收/发送/解析超时被硬编码为无限
+/// （`winhttp.c` 的 `default_timeout = TIMEOUT_INFINITE`；`git2::opts` 的 server-timeout
+/// 不影响它）。因此网络中途静默（连接仍在但无数据）时 libgit2 的 `recv` 会无限阻塞，
+/// 必须自己加看门狗判定「长时间无进度」并中止/重试。
+const CLONE_STALL_TIMEOUT_MS: u64 = 45_000;
+/// 看门狗轮询间隔（毫秒）。
+const CLONE_WATCHDOG_POLL_MS: u64 = 200;
 
 /// 将 git2 错误统一映射为 `AppError::Git`。
 fn gerr(e: git2::Error) -> AppError {
@@ -38,6 +53,12 @@ fn open_repo(dir: &Path) -> Result<Repository, AppError> {
 
 /// 克隆仓库到目标目录，实时推送传输进度（step 用于进度归属）。
 /// GitHub 在国内常抽筋：失败自动重试多次（每次递增等待）。
+///
+/// 仅使用进程内 libgit2。为提高健壮性：
+/// - 每次克隆到一个**临时目录** `<target>.partial-<n>`，成功且 `is_valid_repo` 校验通过后
+///   再替换到最终 `target`，避免任何半成品 / 被放弃线程的写入污染最终目录；
+/// - **看门狗**监测「长时间无进度」：Windows 上 libgit2 走 WinHTTP、接收超时为无限，网络
+///   静默时库会永久阻塞，故由看门狗判定卡顿 → 放弃该次克隆线程 → 换新临时目录重试。
 pub fn clone_with_progress(
     url: &str,
     target: &Path,
@@ -46,48 +67,190 @@ pub fn clone_with_progress(
 ) -> Result<(), AppError> {
     let mut last_err: Option<AppError> = None;
     for attempt in 0..GIT_NET_RETRY {
-        // 失败残留的目录会阻止 git2 再次克隆：重试前清空。
-        if target.exists() {
-            let _ = std::fs::remove_dir_all(target);
-        }
-        match clone_once(url, target, channel, step) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(
-                    GIT_NET_RETRY_DELAY_BASE_MS * (attempt as u64 + 1),
+        // 清理历史残留（含上次可能被放弃线程留下的 .partial-*）。
+        clean_stale_partials(target);
+        let work = temp_clone_dir(target, attempt);
+        let _ = std::fs::remove_dir_all(&work);
+
+        match clone_once_with_timeout(url, &work, channel, step) {
+            CloneOutcome::Ok => {
+                let _ = std::fs::remove_dir_all(target);
+                if std::fs::rename(&work, target).is_ok() {
+                    // 换名成功后清理其它残留临时目录（best-effort）。
+                    clean_stale_partials(target);
+                    return Ok(());
+                }
+                last_err = Some(AppError::Git("克隆完成后整理目录失败".into()));
+                let _ = std::fs::remove_dir_all(&work);
+            }
+            CloneOutcome::Invalid => {
+                last_err = Some(AppError::Git(
+                    "源码克隆不完整（工作树校验失败，package.json 缺失）".into(),
                 ));
+                let _ = std::fs::remove_dir_all(&work);
+            }
+            CloneOutcome::Stalled => {
+                last_err = Some(AppError::Git("克隆多次因网络卡顿失败（长时间无进度）".into()));
+                let _ = std::fs::remove_dir_all(&work);
+            }
+            CloneOutcome::Err(e) => {
+                last_err = Some(e);
+                let _ = std::fs::remove_dir_all(&work);
             }
         }
+        std::thread::sleep(std::time::Duration::from_millis(
+            GIT_NET_RETRY_DELAY_BASE_MS * (attempt as u64 + 1),
+        ));
     }
+    clean_stale_partials(target);
     Err(last_err.unwrap_or_else(|| AppError::Git("克隆仓库失败".into())))
 }
 
-/// 单次克隆（无重试）。
-fn clone_once(
+/// 本次克隆的临时目录：`<target>.partial-<attempt>`（与最终 target 同父目录，便于成功后 rename）。
+fn temp_clone_dir(target: &Path, attempt: u32) -> PathBuf {
+    let base = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "clone".to_string());
+    target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{base}.partial-{attempt}"))
+}
+
+/// 清理 target 旁的 `<base>.partial-*` 残留临时目录（best-effort）。
+fn clean_stale_partials(target: &Path) {
+    let Some(parent) = target.parent() else { return };
+    let base = format!(
+        "{}.partial-",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    );
+    if let Ok(rd) = std::fs::read_dir(parent) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(&base) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+}
+
+/// 单次克隆结果：成功 / 校验不通过 / 看门狗判定卡顿 / 普通错误。
+enum CloneOutcome {
+    Ok,
+    Invalid,
+    Stalled,
+    Err(AppError),
+}
+
+/// 单次（无重试）克隆，带**看门狗超时**。
+///
+/// libgit2 的 clone/传输是同步阻塞的，无法在另一端主动停止；看门狗运行在调用线程：
+/// - 克隆在**子线程**执行，`transfer_progress` 更新「最近有进度的时间戳」，并按百分比节流
+///   推送进度；同时检查中止标志（为 true 则返回 false，让库尽快中止）；
+/// - 若「连接阶段超过 `CLONE_CONNECT_TIMEOUT_MS` 仍无任何进度」或「传输阶段超过
+///   `CLONE_STALL_TIMEOUT_MS` 无进度」→ 判定卡顿：置中止标志；若库仍在回调中则它能立即退出；
+///   若库永久阻塞在网络读上（不回调），则**放弃该线程（不 join）**，由调用方清理临时目录后
+///   重试——该阻塞线程随进程退出而终止，不影响本次流程。
+fn clone_once_with_timeout(
     url: &str,
     target: &Path,
     channel: &Channel<PipelineEvent>,
     step: &str,
-) -> Result<(), AppError> {
-    let mut cb = RemoteCallbacks::new();
+) -> CloneOutcome {
+    let abort = Arc::new(AtomicBool::new(false));
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let first_progress = Arc::new(AtomicBool::new(false));
+    let transfer_done = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+
     let ch = channel.clone();
     let step_s = step.to_string();
-    cb.transfer_progress(move |p| {
-        let _ = ch.send(PipelineEvent::DownloadProgress {
-            step: step_s.clone(),
-            received: p.received_objects() as u64,
-            total: p.total_objects() as u64,
-            speed_bps: 0,
+    let abort2 = abort.clone();
+    let la2 = last_activity.clone();
+    let fp2 = first_progress.clone();
+    let td2 = transfer_done.clone();
+    let last_pct = Arc::new(Mutex::new(-1i32));
+
+    let target_owned = target.to_path_buf();
+    let url_owned = url.to_string();
+    let handle = std::thread::spawn(move || {
+        // 收集回调所需句柄，放进一个具名作用域以配合闭包捕获（避免 move 冲突）。
+        let abort = abort2;
+        let la = la2;
+        let fp = fp2;
+        let td = td2;
+        let lp = last_pct;
+        let ch = ch;
+        let step_s = step_s;
+        let mut cb = RemoteCallbacks::new();
+        cb.transfer_progress(move |p| {
+            let now = Instant::now();
+            *la.lock().unwrap() = now;
+            fp.store(true, Ordering::Relaxed);
+            let received = p.received_objects() as u64;
+            let total = p.total_objects() as u64;
+            if received > 0 && total > 0 && received >= total {
+                td.store(true, Ordering::Relaxed);
+            }
+            if abort.load(Ordering::Relaxed) {
+                return false;
+            }
+            // 按百分比节流推送进度（降低 IPC 压力，也缓解等待前端消费的回压）。
+            if total > 0 {
+                let pct = ((received as f64 / total as f64) * 100.0) as i32;
+                let mut guard = lp.lock().unwrap();
+                if *guard != pct {
+                    *guard = pct;
+                    let (recv, tot) = (received, total);
+                    drop(guard);
+                    let _ = ch.send(PipelineEvent::DownloadProgress {
+                        step: step_s.clone(),
+                        received: recv,
+                        total: tot,
+                        speed_bps: 0,
+                    });
+                }
+            }
+            true
         });
-        true
+        let mut fo = FetchOptions::new();
+        fo.remote_callbacks(cb);
+        let mut builder = RepoBuilder::new();
+        builder.fetch_options(fo);
+        builder.clone(&url_owned, &target_owned).map_err(gerr)
     });
-    let mut fo = FetchOptions::new();
-    fo.remote_callbacks(cb);
-    let mut builder = RepoBuilder::new();
-    builder.fetch_options(fo);
-    builder.clone(url, target).map_err(gerr)?;
-    Ok(())
+
+    loop {
+        if handle.is_finished() {
+            return match handle.join() {
+                Ok(Ok(_)) if is_valid_repo(target) => CloneOutcome::Ok,
+                Ok(Ok(_)) => CloneOutcome::Invalid,
+                Ok(Err(e)) => CloneOutcome::Err(AppError::Git(e.to_string())),
+                Err(_) => CloneOutcome::Err(AppError::Git("克隆线程异常退出".into())),
+            };
+        }
+        let now = Instant::now();
+        if !transfer_done.load(Ordering::Relaxed) {
+            let timed_out = if !first_progress.load(Ordering::Relaxed) {
+                now.duration_since(started) > Duration::from_millis(CLONE_CONNECT_TIMEOUT_MS)
+            } else {
+                let last = *last_activity.lock().unwrap();
+                now.duration_since(last) > Duration::from_millis(CLONE_STALL_TIMEOUT_MS)
+            };
+            if timed_out {
+                // 判定卡顿：请求中止（库在回调中可立即退出）；随后放弃该线程并返回 Stalled。
+                abort.store(true, Ordering::Relaxed);
+                // 给库一个短暂机会自行中止后退出；若仍阻塞则直接弃置（不 join）。
+                std::thread::sleep(Duration::from_millis(300));
+                return CloneOutcome::Stalled;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(CLONE_WATCHDOG_POLL_MS));
+    }
 }
 
 /// `git fetch origin`：拉取远程引用（快进到 `refs/remotes/origin/*`）。
@@ -331,5 +494,36 @@ mod tests {
         assert!(wd.join("tracked.txt").exists());
         assert!(wd.join("node_modules/pkg/index.js").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn temp_clone_dir_naming() {
+        let target = Path::new("C:/repo/deepseek-harness");
+        let d = temp_clone_dir(target, 2);
+        assert_eq!(
+            d.file_name().unwrap().to_string_lossy(),
+            "deepseek-harness.partial-2"
+        );
+        assert_eq!(d.parent(), target.parent());
+    }
+
+    #[test]
+    fn clean_stale_partials_keeps_target_and_other_dirs() {
+        let parent = tmp("partials");
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let target = parent.join("deepseek-harness");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(parent.join("deepseek-harness.partial-0")).unwrap();
+        std::fs::create_dir_all(parent.join("deepseek-harness.partial-3")).unwrap();
+        std::fs::create_dir_all(parent.join("other")).unwrap();
+
+        clean_stale_partials(&target);
+
+        assert!(target.exists());
+        assert!(!parent.join("deepseek-harness.partial-0").exists());
+        assert!(!parent.join("deepseek-harness.partial-3").exists());
+        assert!(parent.join("other").exists());
+        std::fs::remove_dir_all(&parent).ok();
     }
 }

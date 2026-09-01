@@ -1,12 +1,13 @@
 // 控制面板核心状态钩子：管理配置、探测结果、阶段、日志、内嵌浏览器 Tab 与所有动作。
 
 import { App } from "antd";
-import { createElement, useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { createElement, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { api, onLogLine, onPluginUpdatesChecked, onUpdateChecked, onWebStatus } from "./api";
 import KernelSelectBody from "./components/KernelSelectBody";
-import { WEB_URL } from "./constants";
+import { isDshUrl, WEB_URL } from "./constants";
 import { useI18n } from "./i18n";
-import { formatMoney } from "./types";
+import { formatDateTime, formatMoney } from "./types";
 import type {
   BalanceResult,
   BrowserTab,
@@ -17,6 +18,7 @@ import type {
   Phase,
   PipelineEvent,
   PluginUpdates,
+  Rect,
   ToolStatus,
   UninstallPreview,
   UpdateCheckResult,
@@ -64,6 +66,11 @@ function titleFromUrl(url: string, fallback: string): string {
   }
 }
 
+/** 是否为指向本机（127.x / localhost）且携带 token 参数的输出行；用于在日志面板做防御性过滤。 */
+function isTokenLine(line: string): boolean {
+  return /https?:\/\/(?:127\.\d+\.\d+\.\d+|localhost)(?::\d+)?\/[^\s]*[?&]token=/.test(line);
+}
+
 export interface Panel {
   config: AppConfig | null;
   detect: DetectResult | null;
@@ -86,6 +93,8 @@ export interface Panel {
   /** 内嵌浏览器 Tab（纯前端状态）；activeTabId 为 null 时显示控制面板主界面。 */
   tabs: BrowserTab[];
   activeTabId: string | null;
+  /** 内嵌 DSH 原生 Webview 的 DOM 锚点（#tab-content-dsh），由 App 挂载。 */
+  nativeHostRef: RefObject<HTMLDivElement>;
   logDir: string;
   refresh: () => Promise<void>;
   /** 重新检测运行环境工具（仅源码模式 Git；预构建模式返回空）并更新 tools 状态。 */
@@ -157,6 +166,15 @@ export function usePanel(): Panel {
   const [pluginUpdates, setPluginUpdates] = useState<PluginUpdates | null>(null);
   const [logDir, setLogDir] = useState("");
 
+  /** 内嵌 DSH 原生 Webview 的 DOM 锚点（#tab-content-dsh），由 App 挂载。 */
+  const nativeHostRef = useRef<HTMLDivElement>(null);
+  /** 内嵌 Webview 同步状态：记录已创建的 URL 与可见性，避免重复导航/打开。 */
+  const embedRef = useRef<{ url: string | null; shown: boolean; attempting: boolean }>({
+    url: null,
+    shown: false,
+    attempting: false,
+  });
+
   const startedByUs = useRef(false);
   /** 启动失败后是否已提示过修复安装（每会话一次，避免打扰）。 */
   const repairSuggested = useRef(false);
@@ -171,7 +189,7 @@ export function usePanel(): Panel {
 
   const appendLog = useCallback((level: string, text: string) => {
     setLogs((prev) => {
-      const next = [...prev, { level, text, ts: new Date().toLocaleTimeString() }];
+      const next = [...prev, { level, text, ts: formatDateTime(new Date()) }];
       return next.length > MAX_LOG ? next.slice(next.length - MAX_LOG) : next;
     });
   }, []);
@@ -320,6 +338,8 @@ export function usePanel(): Panel {
           break;
         }
         case "output":
+          // 防御性过滤：即便后端遗漏，也不把带 token 的地址行显示到日志面板。
+          if (isTokenLine(e.line)) break;
           appendLog(e.stream === "stderr" ? "WARN" : "INFO", e.line);
           break;
         case "stepFinished": {
@@ -564,10 +584,113 @@ export function usePanel(): Panel {
   const openWebUiRef = useRef(openWebUi);
   openWebUiRef.current = openWebUi;
 
-  /** 打开 DeepSeek Harness 界面。
-   * 新版内核用 `SameSite=Strict` cookie 做浏览器会话认证；程序内标签页是跨站 iframe，
-   * 无法携带该 cookie（会 401），因此这类内核改经**系统浏览器**打开（顶层导航可正常
-   * 认证）。旧内核（无 token/认证）仍在程序内标签页打开。 */
+  /** 内嵌 Webview 锚点的当前几何（逻辑像素），无锚点时返回 null。 */
+  const measureRect = useCallback((): Rect | null => {
+    const el = nativeHostRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      x: Math.round(r.x),
+      y: Math.round(r.y),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    };
+  }, []);
+
+  /**
+   * 同步内嵌原生 Webview：按「活动原生 Tab + web 就绪」决定显示/隐藏，
+   * 并按锚点几何创建/对齐；地址变化时仅重新导航一次，避免反复刷新页面。
+   */
+  const syncEmbedWebview = useCallback(async () => {
+    const active = activeTabId
+      ? tabs.find((t) => t.id === activeTabId && t.native)
+      : undefined;
+    const shouldShow = !!active && webStatus === "ready";
+    const rect = measureRect();
+    if (!shouldShow || !rect) {
+      if (embedRef.current.shown) {
+        try {
+          await api.webviewEmbed.hide();
+          embedRef.current.shown = false;
+        } catch {
+          /* 隐藏失败可忽略 */
+        }
+      }
+      return;
+    }
+    const url = active.url;
+    if (embedRef.current.url !== url) {
+      // 首次进入或地址变化（如重新启动后的新 token）→ 创建/导航。
+      if (embedRef.current.attempting) return;
+      embedRef.current.attempting = true;
+      try {
+        await api.webviewEmbed.create(url, rect);
+        embedRef.current.url = url;
+        embedRef.current.shown = true;
+      } catch (e) {
+        embedRef.current.url = null;
+        embedRef.current.shown = false;
+        message.error(t("msg.embed.fallback", { 0: String(e) }));
+        void openWebUiRef.current();
+        return;
+      } finally {
+        embedRef.current.attempting = false;
+      }
+    } else {
+      // 已创建：仅按最新几何对齐并确保可见（窗口缩放 / 高分屏变化）。
+      try {
+        await api.webviewEmbed.reposition(rect);
+        await api.webviewEmbed.show();
+        embedRef.current.shown = true;
+      } catch (e) {
+        message.error(t("msg.embed.fallback", { 0: String(e) }));
+      }
+    }
+  }, [activeTabId, tabs, webStatus, measureRect, message, t]);
+
+  const syncEmbedRef = useRef(syncEmbedWebview);
+  syncEmbedRef.current = syncEmbedWebview;
+
+  // 状态驱动同步：活动 Tab / URL / web 就绪变化时更新内嵌 Webview。
+  useEffect(() => {
+    void syncEmbedWebview();
+  }, [syncEmbedWebview]);
+
+  // 几何驱动同步：监听锚点尺寸（ResizeObserver）与窗口缩放/DPI 变化，保证贴合不错位。
+  useEffect(() => {
+    const el = nativeHostRef.current;
+    let ro: ResizeObserver | null = null;
+    if (el && typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => void syncEmbedRef.current());
+      ro.observe(el);
+    }
+    let unlistenResize: (() => void) | null = null;
+    let unlistenScale: (() => void) | null = null;
+    try {
+      const win = getCurrentWindow();
+      void win
+        .onResized(() => void syncEmbedRef.current())
+        .then((f) => (unlistenResize = f))
+        .catch(() => undefined);
+      void win
+        .onScaleChanged(() => void syncEmbedRef.current())
+        .then((f) => (unlistenScale = f))
+        .catch(() => undefined);
+    } catch {
+      /* 非 Tauri 运行时（开发浏览器）忽略窗口事件 */
+    }
+    return () => {
+      ro?.disconnect();
+      unlistenResize?.();
+      unlistenScale?.();
+    };
+  }, []);
+
+  /** 打开 DeepSeek Harness 界面（程序内内嵌 Tab）。
+   * 新版内核用 `SameSite=Strict` cookie 做浏览器会话认证 + 反点击劫持响应头，
+   * 纯前端 iframe 无法完成认证/绕过限制；改为经**程序内原生子 Webview** 顶层导航加载
+   * 带 token 的访问地址（见 embed.rs 与下方内嵌 Webview 同步）。若配置为「系统浏览器」
+   * 打开方式，则由 App 层分发到 openWebUi()。 */
   const openDshTab = useCallback(async () => {
     let url = WEB_URL;
     try {
@@ -575,17 +698,7 @@ export function usePanel(): Panel {
     } catch {
       // 获取失败回退默认地址。
     }
-    // 带 token 说明是新版内核：改用系统浏览器（可靠），失败时回退到 iframe 标签页。
-    if (url.includes("?token=")) {
-      try {
-        await api.openWebUi();
-      } catch (e) {
-        message.error(t("msg.openUiFail", { 0: String(e) }));
-        openTabRef.current(url);
-      }
-      return;
-    }
-    const existing = tabs.find((t) => t.url.startsWith(WEB_URL));
+    const existing = tabs.find((t) => t.native || t.url.startsWith(WEB_URL));
     if (existing) {
       // 每次启动 token 都不同：若已有 DSH Tab，则更新为带新 token 的地址后再激活。
       if (existing.url !== url) {
@@ -595,16 +708,20 @@ export function usePanel(): Panel {
     } else {
       openTabRef.current(url);
     }
-  }, [tabs, message, t]);
+  }, [tabs]);
 
   const openDshTabRef = useRef(openDshTab);
   openDshTabRef.current = openDshTab;
 
-  /** 新建 Tab（本地状态）。title 可覆盖（如 blob 指引页无法从 URL 推导标题）。 */
+  /** 新建 Tab（本地状态）。title 可覆盖（如 blob 指引页无法从 URL 推导标题）。
+   * DSH 地址（WEB_URL 前缀）标记为 native，用程序内原生内嵌 Webview 承载；其余走 iframe。 */
   const openTab = useCallback(
     (url: string, title?: string) => {
       const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      setTabs((prev) => [...prev, { id, title: title ?? titleFromUrl(url, t("tab.new")), url }]);
+      setTabs((prev) => [
+        ...prev,
+        { id, title: title ?? titleFromUrl(url, t("tab.new")), url, native: isDshUrl(url) },
+      ]);
       setActiveTabId(id);
     },
     [t],
@@ -684,6 +801,7 @@ export function usePanel(): Panel {
     checkBalance,
     tabs,
     activeTabId,
+    nativeHostRef,
     logDir,
     refresh,
     refreshTools,

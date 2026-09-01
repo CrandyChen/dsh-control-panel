@@ -30,11 +30,6 @@ const zh: Dict = {
   // ── Tab 栏 ──
   "tab.home": "主界面",
   "tab.new": "新建标签页",
-  "tab.new.title": "新建标签页",
-  "tab.new.open": "打开",
-  "tab.new.cancel": "取消",
-  "tab.new.hint": "支持任意 http / https 地址；点击「主界面」随时返回控制面板，关闭全部标签页后自动回到主界面。",
-  "tab.url.invalid": "请输入完整的 http:// 或 https:// 地址",
   "tab.loading": "正在加载页面（{0}）…",
   // ── 操作按钮 ──
   "action.install": "安装",
@@ -304,6 +299,8 @@ const zh: Dict = {
   "msg.settingsFail": "保存设置失败：{0}",
   "msg.clearLogsFail": "清空日志失败：{0}",
   "msg.openUiFail": "打开界面失败：{0}",
+  "msg.embed.fallback":
+    "无法在程序内打开 DSH 界面，已改用系统浏览器打开：{0}",
   "msg.startLog": "🚀 正在启动 DeepSeek Harness，请稍等…",
   "msg.openGuide": "安装指引",
   "msg.envBlocked": "检测到必装环境缺失或版本过低，请先按安装指引完成安装",
@@ -350,11 +347,6 @@ const en: Dict = {
   // ── Tab bar ──
   "tab.home": "Home",
   "tab.new": "New Tab",
-  "tab.new.title": "New Tab",
-  "tab.new.open": "Open",
-  "tab.new.cancel": "Cancel",
-  "tab.new.hint": "Supports any http / https address. Click \"Home\" to return to the panel at any time; closing all tabs returns automatically.",
-  "tab.url.invalid": "Please enter a full http:// or https:// address",
   "tab.loading": "Loading page ({0})…",
   // ── Actions ──
   "action.install": "Install",
@@ -624,6 +616,8 @@ const en: Dict = {
   "msg.settingsFail": "Failed to save settings: {0}",
   "msg.clearLogsFail": "Failed to clear the log: {0}",
   "msg.openUiFail": "Failed to open the UI: {0}",
+  "msg.embed.fallback":
+    "Could not open the DSH UI in-app; opened it in the system browser instead: {0}",
   "msg.startLog": "🚀 Starting DeepSeek Harness, please wait…",
   "msg.openGuide": "Install guide",
   "msg.envBlocked": "Required tools are missing or below minimum version. Follow the install guide first",

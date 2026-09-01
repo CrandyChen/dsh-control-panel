@@ -4,7 +4,9 @@
 //! 只执行标准 git/pnpm 命令，绝不修改 DSH 源码；控制面板自身配置与日志
 //! 保存在 exe 所在目录（portable 语义），与 DSH 完全隔离。
 //!
-//! 多 Tab 浏览器为纯前端 iframe 方案（控制面板主界面常驻挂载），无需原生 webview。
+//! DSH 界面通过 Tauri 2 的**原生子 Webview** 内嵌到主窗口的 Tab 区域（见 embed.rs），
+//! 以顶层导航方式加载带 token 的访问地址，规避新版内核的会话认证与反点击劫持限制；
+//! 安装指引（blob）与自定义 URL 仍以纯前端 iframe 承载。
 
 mod config;
 mod detect;
@@ -26,6 +28,7 @@ mod update;
 mod version;
 mod web;
 mod balance;
+mod embed;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +55,8 @@ pub struct AppState {
     pub preview_cancel: Mutex<Option<Arc<AtomicBool>>>,
     /// 最近一次插件更新检测结果（默认 profile，供前端徽标展示）。
     pub plugin_updates: Mutex<Option<plugin::PluginUpdates>>,
+    /// 内嵌 DSH 界面的原生子 Webview 句柄（复用于所有原生 Tab；见 embed.rs）。
+    pub embed_webview: Mutex<Option<embed::EmbedWebview>>,
 }
 
 // ─────────────────────────────── 命令 ───────────────────────────────
@@ -77,28 +82,27 @@ fn default_parent_dir() -> String {
     config::mode1_default_parent().to_string_lossy().to_string()
 }
 
+/// 同步原生窗口主题到界面主题设置：dark/light 显式设置，auto 跟随系统。
+/// 直接调用窗口 `set_theme`（Windows 上会设置 DWMWA_USE_IMMERSIVE_DARK_MODE），
+/// 使原生标题栏深/浅色跟随软件主题，而不是仅跟随系统深/浅模式。
+#[tauri::command]
+fn set_window_theme(app: AppHandle, theme: String) -> Result<(), String> {
+    let win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口".to_string())?;
+    let t = match theme.as_str() {
+        "dark" => Some(tauri::Theme::Dark),
+        "light" => Some(tauri::Theme::Light),
+        _ => None,
+    };
+    win.set_theme(t).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn detect_state(app: AppHandle) -> DetectResult {
     tauri::async_runtime::spawn_blocking(move || {
-        let logger = app.state::<AppState>().logger.clone();
         let cfg = config::load_config(&app);
-        let result = detect::detect_state(cfg.install_dir.as_deref(), &cfg.install_mode);
-        // 版本与 commit 均由 detect_state 实时读取（config 中可能因手动 git pull 而陈旧）。
-        let commit = result
-            .installed_commit
-            .as_deref()
-            .map(|c| c.chars().take(7).collect::<String>())
-            .unwrap_or_else(|| "—".to_string());
-        logger.info(&crate::i18n::t_fmt(
-            "log.detect_state",
-            &[
-                &result.installed.to_string(),
-                result.version.as_deref().unwrap_or("—"),
-                &commit,
-                &result.running.to_string(),
-            ],
-        ));
-        result
+        detect::detect_state(cfg.install_dir.as_deref(), &cfg.install_mode)
     })
     .await
     .unwrap_or_else(|_| DetectResult {
@@ -116,23 +120,8 @@ async fn detect_state(app: AppHandle) -> DetectResult {
 /// 检测运行环境工具（git 已内置、node/pnpm 按需下载，现无必装项），启动时自动调用。
 #[tauri::command]
 fn detect_tools(app: AppHandle) -> Vec<tools::ToolStatus> {
-    let logger = app.state::<AppState>().logger.clone();
     let cfg = config::load_config(&app);
-    let result = tools::detect_tools(&cfg.install_mode);
-    let summary = result
-        .iter()
-        .map(|t| {
-            format!(
-                "{}={}{}",
-                t.id,
-                if t.installed { "ok" } else { "missing" },
-                t.version.as_deref().map(|v| format!("({v})")).unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    logger.info(&crate::i18n::t_fmt("log.tools_summary", &[&summary]));
-    result
+    tools::detect_tools(&cfg.install_mode)
 }
 
 /// 查询 DeepSeek 当前余额（读 `$DSH_HOME/.credentials.yaml` 的 DEEPSEEK_API_KEY）。
@@ -334,6 +323,26 @@ fn open_terminal(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 脱敏 URL 中的 token 参数（`?token=…` / `&token=…`），用于日志展示：进程级 token
+/// 只经内存传递用于打开界面，不写入任何日志（见 embed.rs）。无 token 时原样返回。
+fn redact_url_token(url: &str) -> String {
+    for marker in ["?token=", "&token="] {
+        if let Some(pos) = url.find(marker) {
+            let val_start = pos + marker.len();
+            let end = url[val_start..]
+                .find('&')
+                .map(|i| val_start + i)
+                .unwrap_or(url.len());
+            let mut out = String::with_capacity(url.len());
+            out.push_str(&url[..val_start]);
+            out.push_str("***");
+            out.push_str(&url[end..]);
+            return out;
+        }
+    }
+    url.to_string()
+}
+
 #[tauri::command]
 fn open_web_ui(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -349,7 +358,8 @@ fn open_web_ui(app: AppHandle) -> Result<(), String> {
     app.opener()
         .open_url(&url, None::<&str>)
         .map_err(|e| e.to_string())?;
-    logger.info(&crate::i18n::t_fmt("log.open_browser", &[&url]));
+    // 日志只记录脱敏后的地址，避免把 token 写入日志。
+    logger.info(&crate::i18n::t_fmt("log.open_browser", &[&redact_url_token(&url)]));
     Ok(())
 }
 
@@ -363,6 +373,70 @@ fn open_external(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     logger.info(&crate::i18n::t_fmt("log.open_external", &[&url]));
     Ok(())
+}
+
+// ─────────────────────────────── 内嵌 Webview ───────────────────────────────
+
+/// 幂等创建（或复用）用于显示 DSH 界面的内嵌子 Webview：导航到 `url` 并按给定
+/// 逻辑尺寸定位后显示。坐标由前端 `getBoundingClientRect()` 计算（逻辑像素）。
+#[tauri::command]
+async fn embed_webview_create(
+    app: AppHandle,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || embed::create(&app, &url, x, y, width, height))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 仅导航内嵌 Webview 到新地址（Tab 间 URL 变化时使用）。
+#[tauri::command]
+async fn embed_webview_navigate(app: AppHandle, url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || embed::navigate(&app, &url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 重新对齐内嵌 Webview 的位置与尺寸（窗口缩放 / 高分屏变化时调用）。
+#[tauri::command]
+async fn embed_webview_reposition(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || embed::reposition(&app, x, y, width, height))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 显示内嵌 Webview。
+#[tauri::command]
+async fn embed_webview_show(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || embed::show(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 隐藏内嵌 Webview（切换到其它 Tab / 主界面 / 服务未就绪时调用）。
+#[tauri::command]
+async fn embed_webview_hide(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || embed::hide(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 彻底关闭并移除内嵌 Webview。
+#[tauri::command]
+async fn embed_webview_close(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || embed::close(&app))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -595,6 +669,7 @@ pub fn run() {
             get_config,
             save_config,
             default_parent_dir,
+            set_window_theme,
             detect_state,
             detect_tools,
             get_balance,
@@ -621,12 +696,23 @@ pub fn run() {
             plugin_install,
             plugin_update,
             plugin_remove,
+            embed_webview_create,
+            embed_webview_navigate,
+            embed_webview_reposition,
+            embed_webview_show,
+            embed_webview_hide,
+            embed_webview_close,
         ])
         .setup(|app| {
             // 先按配置初始化界面语言（启动日志、错误提示等后端文案语言），再初始化日志器。
             let mut cfg = config::load_config(app.handle());
             i18n::set_lang(i18n::lang_from_config(&cfg.language));
             let logger = Logger::init(app.handle());
+            // 防御：显式收紧 libgit2 网络库的连接超时（默认 60s 已有界，这里再明确一次；
+            // 真正需要自扛的是「接收静默」导致的无限阻塞，由克隆看门狗处理）。
+            if let Err(e) = unsafe { git2::opts::set_server_connect_timeout_in_milliseconds(60_000) } {
+                logger.warn(&format!("设置 git 连接超时失败：{e}"));
+            }
             // 启动只检测程序运行目录下的安装情况：无安装记录时自动采用
             // 同目录的 dsh / deepseek-harness 子目录（幂等，仅在发现时写入配置）。
             if detect::ensure_local_install(&mut cfg) {
@@ -642,6 +728,7 @@ pub fn run() {
                 logger: logger.clone(),
                 preview_cancel: Mutex::new(None),
                 plugin_updates: Mutex::new(None),
+                embed_webview: Mutex::new(None),
             });
             logger.info(&crate::i18n::t_fmt(
                 "log.config_loaded",
@@ -655,17 +742,11 @@ pub fn run() {
             // 启动时探测全局 dsh 是否可识别 plugin 子命令；结果写入配置
             // （usePnpmDsh），不可识别时所有 dsh 命令改用 `pnpm dsh` 执行。
             let probe_handle = app.handle().clone();
-            let probe_logger = logger.clone();
             std::thread::spawn(move || {
                 let available = plugin::probe_global_dsh_plugin();
                 let mut cfg = config::load_config(&probe_handle);
                 cfg.use_pnpm_dsh = !available;
                 let _ = config::save_config(&probe_handle, &cfg);
-                if available {
-                    probe_logger.info(&crate::i18n::t("log.dsh_probe_ok"));
-                } else {
-                    probe_logger.info(&crate::i18n::t("log.dsh_probe_fallback"));
-                }
             });
             Ok(())
         })

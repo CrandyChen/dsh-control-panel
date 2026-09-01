@@ -137,22 +137,59 @@ pub fn detect_state(dir: Option<&str>, mode: &str) -> DetectResult {
     }
 }
 
-/// 仅检测程序运行目录（exe 所在目录）下的 DSH 安装情况：
-/// 预构建内核位于 `dsh` 子目录、源码安装位于 `deepseek-harness` 子目录。
-/// 两者同时存在时优先预构建（默认安装方式）。返回 `(安装目录, 安装方式)`。
-pub fn detect_local_default() -> Option<(String, &'static str)> {
-    let prebuilt = crate::config::mode2_install_dir();
-    if is_valid_prebuilt(&prebuilt) {
-        return Some((prebuilt.to_string_lossy().to_string(), "prebuilt"));
+/// 扫描程序运行目录（exe 所在目录）下所有已安装的 DSH 内核：
+/// - 预构建：`dsh-<版本>` 各版本独立目录（以及旧版单一 `dsh` 目录）；
+/// - 源码：`<repo 目录名>`（默认 `deepseek-harness`）目录。
+pub fn scan_local_installs() -> Vec<crate::config::KernelInstall> {
+    let exe = crate::config::exe_dir();
+    let mut out: Vec<crate::config::KernelInstall> = Vec::new();
+
+    // 预构建（版本化 `dsh-*` + 旧版单一 `dsh`）。
+    if let Ok(rd) = std::fs::read_dir(&exe) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // `dsh-` 开头的目录（该前缀仅用于内核目录；dsh-embed 是内嵌 Webview 标签，非目录）。
+            let is_prebuilt_dir = name.starts_with("dsh-") || name == crate::config::MODE2_DIR;
+            if !is_prebuilt_dir {
+                continue;
+            }
+            let dir = entry.path();
+            if !is_valid_prebuilt(&dir) {
+                continue;
+            }
+            let version = read_installed_version(&dir, "prebuilt")
+                .unwrap_or_else(|| name.trim_start_matches("dsh-").to_string());
+            let id = crate::config::kernel_id("prebuilt", &version);
+            out.push(crate::config::KernelInstall {
+                id,
+                mode: "prebuilt".to_string(),
+                version,
+                install_dir: dir.to_string_lossy().to_string(),
+                commit: None,
+                installed_at: crate::config::now_string(),
+            });
+        }
     }
-    let repo = crate::config::exe_dir().join(crate::config::repo_dir_name());
+
+    // 源码安装（仅一份）。
+    let repo = exe.join(crate::config::repo_dir_name());
     if is_valid_repo(&repo) {
-        return Some((repo.to_string_lossy().to_string(), "source"));
+        let version = read_installed_version(&repo, "source").unwrap_or_else(|| "unknown".to_string());
+        out.push(crate::config::KernelInstall {
+            id: crate::config::kernel_id("source", &version),
+            mode: "source".to_string(),
+            version,
+            install_dir: repo.to_string_lossy().to_string(),
+            commit: crate::version::read_commit(&repo),
+            installed_at: crate::config::now_string(),
+        });
     }
-    None
+    out
 }
 
-/// 无安装记录时自动采用程序运行目录下的既有安装，写入配置（幂等：仅在发生变更时保存）。
+/// 无安装记录时自动扫描程序运行目录下的所有既有安装并登记到配置（幂等：仅在发生变更时保存）。
+/// 覆盖 config.json 被删除 / 全新环境等「无 install_dir 记录」场景；同时适配多版本的
+/// `dsh-<版本>` 独立目录。返回是否发生了变更。
 pub fn ensure_local_install(cfg: &mut crate::config::AppConfig) -> bool {
     if cfg
         .install_dir
@@ -162,36 +199,34 @@ pub fn ensure_local_install(cfg: &mut crate::config::AppConfig) -> bool {
     {
         return false;
     }
-    match detect_local_default() {
-        Some((dir, mode)) => {
-            cfg.install_dir = Some(dir.clone());
-            cfg.install_mode = mode.to_string();
-            // 登记为内核记录（版本从磁盘读取，读取失败用「unknown」占位）。
-            let version = read_installed_version(Path::new(&dir), mode)
-                .unwrap_or_else(|| "unknown".to_string());
-            let kid = crate::config::kernel_id(mode, &version);
-            crate::config::upsert_kernel(
-                cfg,
-                crate::config::KernelInstall {
-                    id: kid.clone(),
-                    mode: mode.to_string(),
-                    version,
-                    install_dir: dir.clone(),
-                    commit: if mode == "source" {
-                        crate::version::read_commit(Path::new(&dir))
-                    } else {
-                        None
-                    },
-                    installed_at: crate::config::now_string(),
-                },
-            );
-            if cfg.last_started_kernel_id.is_none() {
-                cfg.last_started_kernel_id = Some(kid);
-            }
-            true
-        }
-        None => false,
+    let installs = scan_local_installs();
+    if installs.is_empty() {
+        return false;
     }
+    let mut changed = false;
+    for k in &installs {
+        crate::config::upsert_kernel(cfg, k.clone());
+        changed = true;
+    }
+    // 活动内核：优先最近启动（无记录时最新预构建），否则源码 / 首条（与 resolve_active_kernel 口径一致）。
+    let active = cfg
+        .last_started_kernel_id
+        .as_deref()
+        .and_then(|id| installs.iter().find(|k| k.id == id))
+        .cloned()
+        .or_else(|| crate::config::latest_prebuilt_kernel(cfg))
+        .or_else(|| installs.iter().find(|k| k.mode == "source").cloned())
+        .or_else(|| installs.first().cloned());
+    if let Some(k) = active {
+        cfg.install_dir = Some(k.install_dir.clone());
+        cfg.install_mode = k.mode.clone();
+        cfg.installed_version = Some(k.version.clone());
+        cfg.installed_commit = k.commit.clone();
+        if cfg.last_started_kernel_id.is_none() {
+            cfg.last_started_kernel_id = Some(k.id.clone());
+        }
+    }
+    changed
 }
 
 /// 读取安装根的内核版本：源码取 apps/cli；预构建取 CLI 包版本。
@@ -270,29 +305,24 @@ mod tests {
     }
 
     #[test]
-    fn local_default_detects_prebuilt_and_source_dirs() {
-        use crate::config::{exe_dir, mode2_install_dir, repo_dir_name};
-        // 预构建内核目录：node_modules/.bin/dsh.cmd 存在即有效。
-        let prebuilt = mode2_install_dir();
+    fn scan_local_installs_detects_versioned_prebuilt_and_source() {
+        let exe = crate::config::exe_dir();
+        // 预构建：dsh-<版本> 独立目录，含 node_modules/.bin/dsh.cmd 与 CLI 包版本。
+        let prebuilt = exe.join("dsh-0.1.2-alpha.2");
         let had_prebuilt = is_valid_prebuilt(&prebuilt);
         if !had_prebuilt {
             std::fs::create_dir_all(prebuilt.join("node_modules/.bin")).unwrap();
             std::fs::write(prebuilt.join("node_modules/.bin/dsh.cmd"), "@echo off").unwrap();
+            std::fs::create_dir_all(prebuilt.join("node_modules/@deepseek-ai/dsh")).unwrap();
+            std::fs::write(
+                prebuilt.join("node_modules/@deepseek-ai/dsh/package.json"),
+                r#"{"name":"@deepseek-ai/dsh","version":"0.1.2-alpha.2"}"#,
+            )
+            .unwrap();
         }
-        let found = detect_local_default().expect("应检出同目录预构建安装");
-        assert_eq!(found.0, prebuilt.to_string_lossy().to_string());
-        assert_eq!(found.1, "prebuilt");
-        if !had_prebuilt {
-            std::fs::remove_dir_all(&prebuilt).unwrap();
-        }
-
-        // 源码仓库目录：无预构建时才轮到它。
-        let repo = exe_dir().join(repo_dir_name());
+        // 源码：<repo 目录名>，含 .git + package.json name=@deepseek-ai/dsh-root。
+        let repo = exe.join(crate::config::repo_dir_name());
         let had_repo = is_valid_repo(&repo);
-        if !had_repo && is_valid_prebuilt(&prebuilt) {
-            // 环境里已有真实预构建目录时无法安全模拟（会先命中预构建），跳过该分支。
-            return;
-        }
         if !had_repo {
             std::fs::create_dir_all(repo.join(".git")).unwrap();
             std::fs::write(
@@ -301,9 +331,18 @@ mod tests {
             )
             .unwrap();
         }
-        let found = detect_local_default().expect("应检出同目录源码安装");
-        assert_eq!(found.0, repo.to_string_lossy().to_string());
-        assert_eq!(found.1, "source");
+
+        let found = scan_local_installs();
+        if had_prebuilt {
+            assert!(found.iter().any(|k| k.mode == "prebuilt"));
+        } else {
+            assert!(found.iter().any(|k| k.mode == "prebuilt" && k.version == "0.1.2-alpha.2"));
+        }
+        assert!(found.iter().any(|k| k.mode == "source"));
+
+        if !had_prebuilt {
+            std::fs::remove_dir_all(&prebuilt).unwrap();
+        }
         if !had_repo {
             std::fs::remove_dir_all(&repo).unwrap();
         }

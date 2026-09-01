@@ -42,11 +42,13 @@ export default function App() {
         token: { borderRadius: 8 },
       }}
     >
-      <AntApp>
-        <I18nContext.Provider value={{ lang, t: makeT(lang) }}>
+      {/* I18nContext 需包在 AntApp 外层：antd 的 modal/message 经由 App 的 portal 渲染，
+          若 Provider 在其内部，portal 内容（如启动内核选择）会读到默认英文 → 选项显示英文。 */}
+      <I18nContext.Provider value={{ lang, t: makeT(lang) }}>
+        <AntApp>
           <Shell onTheme={setDark} lang={lang} onLang={setLang} />
-        </I18nContext.Provider>
-      </AntApp>
+        </AntApp>
+      </I18nContext.Provider>
     </ConfigProvider>
   );
 }
@@ -81,8 +83,12 @@ function Shell({
   }, [l.config?.language, lang, onLang]);
 
   // 主题：按配置（auto/light/dark）解析并应用。auto 跟随系统偏好。
+  // 依赖整个 config 对象：配置刷新（如安装/更新后的 refresh）也会重新解析主题，
+  // 避免界面主题被外部复位（与下方原生窗口主题同步保持一致）。
+  // 配置未加载（config 为 null）时跳过，避免用默认 auto/系统主题覆盖已保存的主题。
   useEffect(() => {
-    const setting = l.config?.theme ?? "auto";
+    if (l.config == null) return;
+    const setting = l.config.theme ?? "auto";
     const d =
       setting === "dark"
         ? true
@@ -90,7 +96,7 @@ function Shell({
           ? false
           : (window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
     onTheme(d);
-  }, [l.config?.theme, onTheme]);
+  }, [l.config, onTheme]);
 
   // auto 模式：监听系统主题变化，实时切换深浅。
   useEffect(() => {
@@ -100,6 +106,22 @@ function Shell({
     mq.addEventListener?.("change", handler);
     return () => mq.removeEventListener?.("change", handler);
   }, [l.config?.theme, onTheme]);
+
+  // 同步原生窗口主题（Windows 标题栏深/浅色跟随界面主题设置）。
+  // 经后端 set_window_theme 直接调用窗口 set_theme（DWMWA_USE_IMMERSIVE_DARK_MODE），
+  // 使标题栏跟随软件主题且覆盖系统默认；auto 传 "auto" 由后端跟随系统。
+  // 依赖整个 config 对象（而非仅 theme 字符串）：任何一次配置刷新（如安装完成后的刷新）
+  // 都会重新应用主题，避免标题栏被外部复位为系统主题。
+  // 配置未加载（config 为 null）时跳过，避免临时传 "auto" 覆盖已保存的深色主题。
+  useEffect(() => {
+    if (l.config == null) return;
+    const setting = l.config.theme ?? "auto";
+    try {
+      void api.setWindowTheme(setting);
+    } catch {
+      /* 非 Tauri 运行时（开发浏览器）忽略 */
+    }
+  }, [l.config]);
 
   // dayjs / 文档标题 / 窗口标题随语言切换。
   useEffect(() => {
@@ -204,7 +226,6 @@ function Shell({
           activeTabId={l.activeTabId}
           onSelect={l.focusTab}
           onClose={l.closeTab}
-          onNew={l.openTab}
           onShowHome={l.showHome}
         />
       )}
@@ -346,10 +367,17 @@ function Shell({
           </div>
         </div>
 
-        {/* 各 Tab 页面（iframe 常驻挂载，display 切换，保留页面状态） */}
+        {/* 各 Tab 页面（非 native 为 iframe 常驻挂载；native 为原生内嵌 Webview） */}
         {l.tabs.map((tab) => (
           <TabFrame key={tab.id} tab={tab} active={l.activeTabId === tab.id} />
         ))}
+
+        {/* 内嵌 DSH 原生 Webview 的锚点（#tab-content-dsh）：native Tab 由 Rust 子 Webview 覆盖 */}
+        <div
+          ref={l.nativeHostRef}
+          aria-hidden
+          style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+        />
       </Layout.Content>
 
       <InstallModal

@@ -146,7 +146,7 @@ fn update_prebuilt(
         id: "download".into(),
         title: crate::i18n::t("step.download"),
     });
-    logger.info(&crate::i18n::t("log.prebuilt_update_start"));
+    logger.file_only_info(&crate::i18n::t("log.prebuilt_update_start"));
 
     let release = crate::prebuilt::latest_release().map_err(|e| e.friendly())?;
     let norm = crate::version::normalized_tag_version(&release.tag);

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # ============================================================
 #  maintain.ps1 — DSH Control Panel 项目维护工具（WinForms GUI）
 #
@@ -197,9 +197,20 @@ function Invoke-Process {
         [string[]]$Arguments,
         [string]$WorkingDirectory = $script:RepoRoot,
         [hashtable]$Environment = @{},
-        [string]$StderrLevel = 'WARN'
+        [string]$StderrLevel = 'WARN',
+        # 日志中展示的命令字符串（如 "git pull --ff-only"）；缺省时自动从 FileName/Arguments 推导
+        [string]$DisplayCommand = $null
     )
     $argLine = ($Arguments | ForEach-Object { Quote-Arg $_ }) -join ' '
+    # 每条命令执行前写入日志（便于审计操作）。pnpm 经 cmd.exe /d /s /c 包装，展示真实命令。
+    if (-not $DisplayCommand) {
+        if ($FileName -match 'cmd\.exe$' -and $Arguments.Count -ge 4) {
+            $DisplayCommand = (($Arguments | Select-Object -Skip 3) -join ' ')
+        } else {
+            $DisplayCommand = "$FileName $argLine"
+        }
+    }
+    Append-Log "▶ $DisplayCommand" 'CMD'
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FileName
     $psi.Arguments = $argLine
@@ -257,6 +268,7 @@ function Invoke-Process {
                 $script:StopRequested = $false
                 $stopped = $true
                 Append-Log '用户请求停止，正在终止任务…' 'WARN'
+                Append-Log "▶ taskkill.exe /PID $($proc.Id) /T /F" 'CMD'
                 & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>$null | Out-Null
                 break
             }
@@ -287,7 +299,8 @@ function Invoke-Git {
     # git 大量正常提示写在 stderr（如 To https://…、Already up to date.），以 INFO（灰色）流出，
     # 真正的 error/fatal 行会在上方被标为 ERROR（红色）。
     return Invoke-Process -FileName $git -Arguments $Arguments -WorkingDirectory $WorkingDirectory `
-        -Environment @{ 'GIT_TERMINAL_PROMPT' = '0' } -StderrLevel 'INFO'
+        -Environment @{ 'GIT_TERMINAL_PROMPT' = '0' } -StderrLevel 'INFO' `
+        -DisplayCommand ("git " + (($Arguments | ForEach-Object { Quote-Arg $_ }) -join ' '))
 }
 
 function Invoke-Pnpm {
@@ -298,7 +311,8 @@ function Invoke-Pnpm {
     # CI=true 与 confirmModulesPurge=false 使其自动清空/重装 node_modules 而不弹确认。
     return Invoke-Process -FileName "$env:SystemRoot\System32\cmd.exe" `
         -Arguments @('/d', '/s', '/c', $cmdline) -WorkingDirectory $WorkingDirectory `
-        -Environment @{ 'CI' = 'true'; 'npm_config_confirm_modules_purge' = 'false' }
+        -Environment @{ 'CI' = 'true'; 'npm_config_confirm_modules_purge' = 'false' } `
+        -DisplayCommand ("pnpm " + (($Arguments | ForEach-Object { Quote-Arg $_ }) -join ' '))
 }
 
 # ============================================================
@@ -768,6 +782,20 @@ $script:ActBuild = {
     finally { Set-Busy $false; Refresh-Status }
 }
 
+$script:ActBuildPortable = {
+    if (-not (Assert-Env @('node', 'pnpm', 'rust', 'vscpp'))) { return }
+    $light = Confirm-Message '构建便携版程序' (
+        "请选择运行时模式：`n`n· 是(Y) = 轻量（`pnpm portable --no-runtime --no-zip`，体积小；首次安装时自动下载运行环境）`n· 否(N) = 内置运行时（`pnpm portable --no-zip`，无需联网但体积大）`n`n只会构建 portable 目录（exe + 运行时 + README，输出到 dist-portable），不生成 zip。")
+    Set-Busy $true
+    try {
+        $args = if ($light) { @('portable', '--no-runtime', '--no-zip') } else { @('portable', '--no-zip') }
+        $mode = $(if ($light) { '轻量（--no-runtime）' } else { '内置运行时' })
+        $c = Invoke-Pnpm $args
+        Show-Result ("构建便携版程序（$mode）") $c
+    }
+    finally { Set-Busy $false; Refresh-Status }
+}
+
 $script:ActPortable = {
     if (-not (Assert-Env @('node', 'pnpm', 'rust', 'vscpp'))) { return }
     $light = Confirm-Message '打包便携版' (
@@ -1206,6 +1234,7 @@ function Build-Form {
     $btnInstall  = New-MenuButton '安装依赖  (pnpm install)' $script:ActInstall
     $btnDev      = New-MenuButton '本地开发运行  (pnpm tauri dev)' $script:ActDev
     $btnBuild    = New-MenuButton '构建安装程序  (pnpm tauri build)' $script:ActBuild
+    $btnBuildPortable = New-MenuButton '构建便携版程序  (pnpm portable --no-zip)' $script:ActBuildPortable
     $btnPortable = New-MenuButton '打包便携版 zip  (pnpm portable[--no-runtime])' $script:ActPortable
     # 主分支开发
     $btnSyncMain = New-MenuButton '同步主分支  (checkout main + pull)' $script:ActSyncMain
@@ -1222,7 +1251,7 @@ function Build-Form {
     $btnGitConfig= New-MenuButton '设置全局 Git 用户名/邮箱' $script:ActGitConfig
     $btnEnv      = New-MenuButton '环境依赖自检' $script:ActEnvCheck
 
-    $pageDev = New-TabPage '本地开发' '安装依赖、运行、构建、打包。执行前会自动检查 Node / pnpm / Rust / VS C++ Build Tools；打包时可选择轻量（--no-runtime）或内置运行时。' @($btnInstall, $btnDev, $btnBuild, $btnPortable)
+    $pageDev = New-TabPage '本地开发' '安装依赖、运行、构建、打包。执行前会自动检查 Node / pnpm / Rust / VS C++ Build Tools；构建便携版程序/打包 zip 时可选择轻量（--no-runtime）或内置运行时，构建便携版程序只输出目录、不生成 zip。' @($btnInstall, $btnDev, $btnBuild, $btnBuildPortable, $btnPortable)
     $pageMain = New-TabPage '主分支开发' '直接在主分支上开发：同步、提交代码（提交基于当前分支，会询问是否推送）、发布新版本。' @($btnSyncMain, $btnCommitMain, $btnRelease)
     $pageBranch = New-TabPage '功能分支开发' '先创建功能分支，开发后提交代码，推送到 GitHub 并提交 PR；合并后回主分支同步并清理本地分支。' @($btnCreateBr, $btnCommitBr, $btnPushBr, $btnSyncMerged, $btnDelBr)
     $pageTool = New-TabPage '工具 / 设置' '克隆项目到本地、设置全局 Git 身份、环境依赖自检。' @($btnClone, $btnGitConfig, $btnEnv)
@@ -1311,7 +1340,7 @@ function Build-Form {
     $script:LblVersion = $lblVersion
     $script:BtnStop = $btnStop
     $script:BtnRefresh = $btnRefresh
-    $script:ActionButtons = @($btnInstall, $btnDev, $btnBuild, $btnPortable, $btnSyncMain, $btnCommitMain,
+    $script:ActionButtons = @($btnInstall, $btnDev, $btnBuild, $btnBuildPortable, $btnPortable, $btnSyncMain, $btnCommitMain,
         $btnRelease, $btnCreateBr, $btnCommitBr, $btnPushBr, $btnSyncMerged, $btnDelBr, $btnClone, $btnGitConfig, $btnEnv)
 
     # --- 日志刷新 Timer：UI 线程定时把队列内容写入日志框（避免跨线程更新控件），并按级别着色 ---
@@ -1324,11 +1353,12 @@ function Build-Form {
             $changed = $false
             while ($script:LogQueue.Count -gt 0) {
                 $item = $script:LogQueue.Dequeue()
-                # 按级别着色：OK 绿 / INFO 灰白 / WARN 琥珀 / ERROR 红
+                # 按级别着色：OK 绿 / INFO 灰白 / WARN 琥珀 / ERROR 红 / CMD 蓝（执行的命令）
                 switch ($item.Kind) {
                     'OK'    { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(80, 200, 120) }
                     'WARN'  { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(250, 173, 20) }
                     'ERROR' { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(255, 92, 92) }
+                    'CMD'   { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(96, 165, 250) }
                     default { $script:LogBox.SelectionColor = [System.Drawing.Color]::FromArgb(210, 215, 220) }
                 }
                 $script:LogBox.AppendText($item.Text + [Environment]::NewLine)

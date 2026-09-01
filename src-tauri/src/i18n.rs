@@ -47,18 +47,15 @@ pub fn lang_from_config(s: &str) -> Lang {
 /// 后端文案目录：返回 (中文, English)。未知 key 返回 None（由调用方原样透出）。
 fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
     Some(match key {
-        // ── web 启动 / 认证 ──
-        "log.web_url_captured" => (
-            "已捕获 DSH web 访问地址（含 token）",
-            "Captured the DSH web URL (with token)",
+        // ── web 启动 ──
+        "log.web_ready" => (
+            "✅ DSH Web 就绪",
+            "✅ DSH Web ready",
         ),
-        "log.web_auth_required" => (
-            "DSH web 需要浏览器会话认证，等待其输出带 token 的访问地址…",
-            "DSH web requires browser-session auth; waiting for the token URL…",
-        ),
-        "log.web_ready_auth" => (
-            "已获取带 token 的访问地址，DSH web 就绪",
-            "Token URL ready; DSH web is up",
+        // ── 内嵌 Webview ──
+        "embed.window_missing" => (
+            "未找到内嵌 Webview 的主窗口",
+            "Could not find the main window for the embedded Webview",
         ),
         // ── 内核条目展示（卸载清单 / 卸载进度） ──
         "kernel.display.prebuilt" => (
@@ -247,11 +244,6 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "⚙ 保存设置（自动检测 / 间隔 / 语言等）",
             "⚙ Settings saved (auto-check / interval / language, etc.)",
         ),
-        "log.detect_state" => (
-            "🔎 状态探测: installed={0} version={1} commit={2} running={3}",
-            "🔎 State probe: installed={0} version={1} commit={2} running={3}",
-        ),
-        "log.tools_summary" => ("🔧 环境检测: {0}", "🔧 Runtime check: {0}"),
         "log.local_install_adopted" => (
             "✅ 已自动采用程序运行目录下的安装: {0}",
             "✅ Automatically adopted the installation in the program directory: {0}",
@@ -263,14 +255,6 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "log.open_terminal" => ("🖥 打开终端: {0}", "🖥 Opened terminal: {0}"),
         "log.open_browser" => ("🌐 在系统浏览器打开 {0}", "🌐 Opened {0} in the system browser"),
         "log.open_external" => ("🔗 打开外部链接: {0}", "🔗 Opened external link: {0}"),
-        "log.dsh_probe_ok" => (
-            "🔌 dsh 命令探测：全局 dsh 可用（插件命令以 dsh 执行）",
-            "🔌 dsh probe: global dsh available (plugin commands run via dsh)",
-        ),
-        "log.dsh_probe_fallback" => (
-            "🔌 dsh 命令探测：全局 dsh 不可用（插件等 dsh 命令将以 pnpm dsh 执行）",
-            "🔌 dsh probe: global dsh unavailable (dsh commands will run via `pnpm dsh`)",
-        ),
         "log.step_start" => ("▶ {0}: {1} {2}", "▶ {0}: {1} {2}"),
         "log.step_done" => ("✓ {0} 完成（退出码 {1}）", "✓ {0} finished (exit code {1})"),
         "log.install_done" => (

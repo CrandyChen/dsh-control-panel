@@ -118,8 +118,10 @@ pub fn run_pipeline(
             title: step.title.into(),
         });
         // 日志按界面语言输出（步骤标题本地化，未知步骤回退原文）。
+        // 该起止标记仅落盘：步骤进度已由前端 StepStarted/StepFinished 渲染为「▶/✓ 标题」，
+        // 不再同时推送 UI，避免日志面板出现重复步骤行（见 logging::file_only_info）。
         let title = crate::i18n::t_or(&format!("step.{}", step.id), step.title);
-        logger.info(&crate::i18n::t_fmt(
+        logger.file_only_info(&crate::i18n::t_fmt(
             "log.step_start",
             &[&title, step.program, &step.args.join(" ")],
         ));
@@ -168,7 +170,7 @@ pub fn run_pipeline(
 
         let status = child.wait()?;
         let exit_code = status.code().unwrap_or(-1);
-        logger.info(&crate::i18n::t_fmt(
+        logger.file_only_info(&crate::i18n::t_fmt(
             "log.step_done",
             &[&title, &exit_code.to_string()],
         ));

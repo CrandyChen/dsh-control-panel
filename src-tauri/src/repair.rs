@@ -116,8 +116,10 @@ fn run_step(
         title: title.into(),
     });
     // 日志按界面语言输出（步骤标题本地化，未知步骤回退原文）。
+    // 起止标记仅落盘：步骤进度已由前端 StepStarted/StepFinished 渲染为「▶/✓ 标题」，
+    // 不再同时推送 UI，避免日志面板出现重复步骤行（见 logging::file_only_info）。
     let title = crate::i18n::t_or(&format!("step.{step_id}"), title);
-    logger.info(&crate::i18n::t_fmt(
+    logger.file_only_info(&crate::i18n::t_fmt(
         "log.step_start",
         &[&title, programs[0], &argv.join(" ")],
     ));
@@ -127,7 +129,7 @@ fn run_step(
         exit_code: outcome.exit_code,
     });
     if outcome.ok {
-        logger.info(&crate::i18n::t_fmt("log.repair_step_done", &[&title]));
+        logger.file_only_info(&crate::i18n::t_fmt("log.repair_step_done", &[&title]));
     } else {
         logger.error(&crate::i18n::t_fmt(
             "log.repair_step_failed",

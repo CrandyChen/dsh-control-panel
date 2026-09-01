@@ -1,4 +1,5 @@
-// 单个浏览器 Tab 的 iframe 容器：加载完成前显示「正在加载」提示。
+// 单个浏览器 Tab 的容器：普通 Tab 用 iframe 承载；DSH 界面（native）由程序内
+// 原生子 Webview 呈现（覆盖于锚点区域之上），这里只保留加载占位。
 
 import { LoadingOutlined } from "@ant-design/icons";
 import { Flex, Spin, theme, Typography } from "antd";
@@ -36,18 +37,24 @@ export default function TabFrame({ tab, active }: Props) {
           </Typography.Text>
         </Flex>
       )}
-      <iframe
-        src={tab.url}
-        title={tab.title}
-        onLoad={() => setLoaded(true)}
-        style={{
-          position: "absolute",
-          inset: 0,
-          width: "100%",
-          height: "100%",
-          border: "none",
-        }}
-      />
+      {tab.native ? (
+        // DSH 界面由程序内**原生子 Webview** 呈现（覆盖在锚点区域之上），
+        // 这里不渲染 iframe（会 401），仅保留一个占位（原生 Webview 挂载前短暂可见加载态）。
+        <div style={{ position: "absolute", inset: 0 }} />
+      ) : (
+        <iframe
+          src={tab.url}
+          title={tab.title}
+          onLoad={() => setLoaded(true)}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            border: "none",
+          }}
+        />
+      )}
     </div>
   );
 }

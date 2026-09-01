@@ -39,11 +39,6 @@ pub fn runtime_dir() -> PathBuf {
     exe_dir().join(RUNTIME_DIR)
 }
 
-/// 预构建内核（模式二）安装目录：程序运行目录下的 dsh 子目录。
-pub fn mode2_install_dir() -> PathBuf {
-    exe_dir().join(MODE2_DIR)
-}
-
 /// 源码安装（模式一）父目录：固定为程序运行目录（exe 所在目录）。
 pub fn mode1_default_parent() -> PathBuf {
     exe_dir()

@@ -123,11 +123,25 @@ export type PipelineEvent =
 
 export type WebStatus = "idle" | "starting" | "ready" | "stopped" | "error";
 
-/** 内嵌浏览器 Tab（纯前端 iframe 模型）。 */
+/**
+ * 内嵌浏览器 Tab。
+ * - native=true：DSH 界面，由程序内**原生子 Webview** 承载（顶层导航，规避认证/点击劫持限制）；
+ * - native=false：普通 iframe（安装指引 blob、自定义 URL）。
+ */
 export interface BrowserTab {
   id: string;
   title: string;
   url: string;
+  /** 是否用原生内嵌 Webview 呈现（仅 DSH 界面为 true）。 */
+  native: boolean;
+}
+
+/** 内嵌 Webview 位置/尺寸（逻辑像素，相对主窗口客户区；由 getBoundingClientRect() 得出）。 */
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface LogLine {
@@ -227,4 +241,10 @@ export function formatSize(bytes: number): string {
 export function formatMoney(value: number, currency: string): string {
   const sym = currency === "CNY" ? "¥" : `${currency} `;
   return `${sym}${value.toFixed(2)}`;
+}
+
+/** 将 Date 格式化为 `YYYY-MM-DD HH:mm:ss`（与后端 now_string() 输出一致，用于日志时间戳）。 */
+export function formatDateTime(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }

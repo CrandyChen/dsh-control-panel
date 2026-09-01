@@ -1,5 +1,8 @@
-// 打包 portable zip：pnpm tauri build → 组装目录（含内置 runtime） → 压缩。
+// 打包 portable：pnpm tauri build → 组装目录（含内置 runtime） → 压缩 zip。
 // 用法：pnpm portable（或 node scripts/package-portable.mjs）
+//      pnpm portable --no-zip      仅构建 portable 目录（exe + runtime + README），不压缩 zip
+//      pnpm portable --no-runtime  跳过内置运行时（首次安装时自动下载）
+//      pnpm portable --no-zip --no-runtime  两者组合
 //
 // 内置运行时（runtime\）用于「更独立」的便携运行：DSH 的源码安装 / 预构建内核与
 // 插件管理都依赖 node/pnpm，无需用户全局安装。dev 下若无 runtime 目录则回退系统 PATH。
@@ -29,6 +32,9 @@ const exeName = "DSH-Control-Panel.exe";
 // 是否跳过内置运行时：`--no-runtime` 或环境变量 `NO_BUNDLE_RUNTIME=1`。
 // 开启后 zip 仅含 exe + README（运行时在首次安装时由应用自动下载，显著减小体积）。
 const noRuntime = process.argv.includes("--no-runtime") || process.env.NO_BUNDLE_RUNTIME === "1";
+// 是否跳过最后的 zip 压缩（`--no-zip`）：仅构建 portable 目录（exe + runtime + README），
+// 供「构建便携版程序」使用，便于检查产物而不生成压缩包。
+const noZip = process.argv.includes("--no-zip");
 // Tauri 是否将主程序重命名为 productName 取决于构建配置：兼容两种产物名。
 const exeCandidates = [
   join(root, "src-tauri", "target", "release", exeName),
@@ -378,13 +384,17 @@ writeFileSync(
   ].join("\r\n"),
 );
 
-console.log("[5/5] 压缩 zip ...");
-rmSync(zipPath, { force: true });
-const r = spawnSync("tar", ["-a", "-c", "-f", zipPath, "-C", dirname(distDir), basename(distDir)], {
-  stdio: "inherit",
-});
-if (r.status !== 0) {
-  throw new Error("压缩 zip 失败");
+if (noZip) {
+  console.log("[5/5] 已跳过 zip 压缩（--no-zip），仅构建 portable 目录。");
+} else {
+  console.log("[5/5] 压缩 zip ...");
+  rmSync(zipPath, { force: true });
+  const r = spawnSync("tar", ["-a", "-c", "-f", zipPath, "-C", dirname(distDir), basename(distDir)], {
+    stdio: "inherit",
+  });
+  if (r.status !== 0) {
+    throw new Error("压缩 zip 失败");
+  }
 }
 
 // 清理打包临时产物（下载的 zip / 解压目录），避免残留在 dist-portable。
@@ -392,4 +402,4 @@ for (const a of tempArtifacts) {
   rmSync(a, { recursive: true, force: true });
 }
 
-console.log(`✅ 完成：${zipPath}`);
+console.log(noZip ? `✅ 构建完成（未压缩 zip）：${distDir}` : `✅ 完成：${zipPath}`);

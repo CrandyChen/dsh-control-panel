@@ -87,9 +87,9 @@ pub fn start_web(
     });
     let _ = app.emit("web-status", "starting");
     if mode == "source" {
-        logger.info(&crate::i18n::t("log.web_start"));
+        logger.file_only_info(&crate::i18n::t("log.web_start"));
     } else {
-        logger.info(&crate::i18n::t("log.web_start_prebuilt"));
+        logger.file_only_info(&crate::i18n::t("log.web_start_prebuilt"));
     }
 
     // 预构建模式：启动前校准 profile bundle（幂等）。`~/.dsh` 可能残留其它
@@ -145,19 +145,24 @@ pub fn start_web(
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 // 捕获 DSH 输出的带 token 访问 URL（新版内核；旧内核无则保持 None）。
-                if let Some(url) = extract_token_url(&line) {
-                    logger2.info(&crate::i18n::t("log.web_url_captured"));
+                // 该 URL 含进程级 token，仅经内存写入状态供打开界面使用，不写日志。
+                let captured = extract_token_url(&line);
+                if let Some(url) = captured.clone() {
                     if let Some(state) = app3.try_state::<AppState>() {
                         *state.web_url.lock().unwrap() = Some(url);
                     }
                 }
-                let _ = ch.send(PipelineEvent::Output {
-                    step: "web".into(),
-                    stream: "stdout".into(),
-                    line: line.clone(),
-                });
-                push_tail(&tail2, line.clone());
-                logger2.log_dsh(&line);
+                // token 行既不推送 UI（PipelineEvent::Output）、不落日志，也不进快速退出
+                // 错误尾部，避免 token 泄漏到日志面板/日志文件/错误信息。
+                if captured.is_none() {
+                    let _ = ch.send(PipelineEvent::Output {
+                        step: "web".into(),
+                        stream: "stdout".into(),
+                        line: line.clone(),
+                    });
+                    push_tail(&tail2, line.clone());
+                    logger2.log_dsh(&line);
+                }
             }
         });
     }
@@ -167,6 +172,10 @@ pub fn start_web(
     if let Some(err) = stderr {
         std::thread::spawn(move || {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
+                // 防御性过滤：极少数情况下 token 地址可能出现在 stderr，同样不推送 UI/不落盘。
+                if extract_token_url(&line).is_some() {
+                    continue;
+                }
                 let _ = ch.send(PipelineEvent::Output {
                     step: "web".into(),
                     stream: "stderr".into(),
@@ -195,6 +204,7 @@ pub fn start_web(
                     HttpProbe::NotReady => {}
                     HttpProbe::Ready => {
                         // 旧内核直接可用：无需 token。
+                        logger3.info(&crate::i18n::t("log.web_ready"));
                         let _ = app2.emit("web-status", "ready");
                         return;
                     }
@@ -204,7 +214,6 @@ pub fn start_web(
                         // stdout 线程捕获后再发 ready，否则 openDshTab / open_web_ui 会
                         // 回退到不带 token 的默认地址（导致 401）。
                         awaiting_token = true;
-                        logger3.info(&crate::i18n::t("log.web_auth_required"));
                     }
                 }
             } else {
@@ -213,7 +222,7 @@ pub fn start_web(
                     .map(|s| s.web_url.lock().unwrap().is_some())
                     .unwrap_or(false);
                 if has_token {
-                    logger3.info(&crate::i18n::t("log.web_ready_auth"));
+                    logger3.info(&crate::i18n::t("log.web_ready"));
                     let _ = app2.emit("web-status", "ready");
                     return;
                 }

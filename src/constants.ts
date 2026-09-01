@@ -18,5 +18,14 @@ export const PREBUILT_PKG_REPO = "https://github.com/dsh-tauri-desk/deepseek-har
 /** 插件推荐列表地址（GitHub 页面无法内嵌 iframe，需在系统浏览器打开）。 */
 export const AWESOME_PLUGINS_URL = "https://github.com/AdamPlatin123/awesome-dsh-plugins";
 
-/** TabBar 高度（px），必须与 Rust src/tabs.rs 的 TAB_BAR_HEIGHT 保持一致。 */
+/** TabBar 高度（px）。 */
 export const TAB_BAR_HEIGHT = 44;
+
+/**
+ * 判定某个 URL 是否为 DSH 界面（用原生内嵌 Webview 承载，而非 iframe）。
+ * 新版 DSH 内核的 web UI 使用 SameSite=Strict 会话 Cookie 与反点击劫持响应头，
+ * 纯 iframe 无法完成认证与绕过限制，因此这类地址改为程序内原生 Webview 呈现。
+ */
+export function isDshUrl(url: string): boolean {
+  return url.startsWith(WEB_URL);
+}
