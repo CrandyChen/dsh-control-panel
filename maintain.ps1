@@ -1251,7 +1251,7 @@ function Build-Form {
     $btnGitConfig= New-MenuButton '设置全局 Git 用户名/邮箱' $script:ActGitConfig
     $btnEnv      = New-MenuButton '环境依赖自检' $script:ActEnvCheck
 
-    $pageDev = New-TabPage '本地开发' '安装依赖、运行、构建、打包。执行前会自动检查 Node / pnpm / Rust / VS C++ Build Tools；构建便携版程序/打包 zip 时可选择轻量（--no-runtime）或内置运行时，构建便携版程序只输出目录、不生成 zip。' @($btnInstall, $btnDev, $btnBuild, $btnBuildPortable, $btnPortable)
+    $pageDev = New-TabPage '本地开发' '安装依赖、运行、构建、打包。执行前会自动检查 Node / pnpm / Rust / VS C++ Build Tools。' @($btnInstall, $btnDev, $btnBuild, $btnBuildPortable, $btnPortable)
     $pageMain = New-TabPage '主分支开发' '直接在主分支上开发：同步、提交代码（提交基于当前分支，会询问是否推送）、发布新版本。' @($btnSyncMain, $btnCommitMain, $btnRelease)
     $pageBranch = New-TabPage '功能分支开发' '先创建功能分支，开发后提交代码，推送到 GitHub 并提交 PR；合并后回主分支同步并清理本地分支。' @($btnCreateBr, $btnCommitBr, $btnPushBr, $btnSyncMerged, $btnDelBr)
     $pageTool = New-TabPage '工具 / 设置' '克隆项目到本地、设置全局 Git 身份、环境依赖自检。' @($btnClone, $btnGitConfig, $btnEnv)

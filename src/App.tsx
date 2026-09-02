@@ -32,8 +32,17 @@ import type { ToolStatus } from "./types";
 import { formatSize } from "./types";
 import { usePanel } from "./usePanel";
 
-export default function App() {
-  const [dark, setDark] = useState(true);
+/** 把主题设置（auto/light/dark）解析为首帧是否用深色（auto 跟随系统偏好）。
+ * 供 main.tsx 在渲染前用 config.json 的 theme 同步初始化，避免「先黑后浅」闪烁。 */
+function themeToDark(setting: string): boolean {
+  if (setting === "dark") return true;
+  if (setting === "light") return false;
+  // auto / 未知：跟随系统偏好。
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
+}
+
+export default function App({ initialTheme }: { initialTheme: string }) {
+  const [dark, setDark] = useState(() => themeToDark(initialTheme));
   const [lang, setLang] = useState<Lang>(detectSystemLang());
   return (
     <ConfigProvider
