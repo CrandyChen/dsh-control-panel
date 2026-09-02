@@ -47,6 +47,8 @@ pub enum PipelineEvent {
     },
     /// 运行环境（node/pnpm）下载/解压完成：前端据此隐藏运行环境进度条。
     RuntimeDone,
+    /// 分阶段进度（如插件管理）：title 为当前阶段文字，percent 为里程碑百分比（0-100）。
+    Phase { title: String, percent: u8 },
 }
 
 /// 流水线中的一个步骤。

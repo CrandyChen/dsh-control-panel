@@ -96,9 +96,14 @@ impl Logger {
     }
 
     /// 把一行写入当日日志文件（不推送前端事件），返回生成的时间戳。
-    fn write_file(&self, level: &str, msg: &str) -> String {
+    /// `source` 为可选来源标记（如插件管理），非空时写入 `[{ts}] [{level}] [{source}] {msg}`，
+    /// 用于在合并日志中区分日志类型与来源。
+    fn write_file(&self, level: &str, source: Option<&str>, msg: &str) -> String {
         let ts = crate::config::now_string();
-        let line = format!("[{ts}] [{level}] {msg}");
+        let line = match source {
+            Some(s) if !s.is_empty() => format!("[{ts}] [{level}] [{s}] {msg}"),
+            _ => format!("[{ts}] [{level}] {msg}"),
+        };
         if let Ok(mut guard) = self.inner.lock() {
             if let Some(f) = guard.file.as_mut() {
                 let _ = writeln!(f, "{line}");
@@ -109,7 +114,7 @@ impl Logger {
     }
 
     pub fn log(&self, level: &str, msg: &str) {
-        let ts = self.write_file(level, msg);
+        let ts = self.write_file(level, None, msg);
         let _ = self.app.emit(
             "log-line",
             serde_json::json!({ "level": level, "text": msg, "ts": ts }),
@@ -120,7 +125,13 @@ impl Logger {
     /// 用于已被前端 `StepStarted`/`StepFinished` 步骤事件展示的起止标记，
     /// 避免同一进度在日志面板重复出现，同时保留完整磁盘日志。
     pub fn file_only(&self, level: &str, msg: &str) {
-        let _ = self.write_file(level, msg);
+        let _ = self.write_file(level, None, msg);
+    }
+
+    /// 只写入日志文件，并带来源标记（如 `[插件管理]`）：用于插件管理等
+    /// 需要在合并日志中区分类型/来源的详细日志。不推送前端 `log-line` 事件。
+    pub fn file_only_tagged(&self, source: &str, level: &str, msg: &str) {
+        let _ = self.write_file(level, Some(source), msg);
     }
 
     pub fn file_only_info(&self, msg: &str) {

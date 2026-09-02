@@ -3,7 +3,7 @@
 import { App } from "antd";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createElement, useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { api, onLogLine, onPluginUpdatesChecked, onUpdateChecked, onWebStatus } from "./api";
+import { api, onAppUpdateReady, onAppUpdateState, onLogLine, onPluginUpdatesChecked, onUpdateChecked, onWebStatus } from "./api";
 import KernelSelectBody from "./components/KernelSelectBody";
 import { isDshUrl, WEB_URL } from "./constants";
 import { useI18n } from "./i18n";
@@ -13,6 +13,7 @@ import type {
   BrowserTab,
   DetectResult,
   AppConfig,
+  AppUpdateState,
   KernelInstall,
   LogLine,
   Phase,
@@ -129,6 +130,16 @@ export interface Panel {
   pluginUpdates: PluginUpdates | null;
   /** 手动触发一次当前 profile 的插件更新检测。 */
   checkPluginUpdates: () => Promise<void>;
+  /** 控制面板自身更新状态（检测 / 下载 / 就绪 / 失败）。 */
+  appUpdate: AppUpdateState | null;
+  /** 是否打开了软件升级对话框（本程序检测到完整更新包后自动打开）。 */
+  appUpdateDialogOpen: boolean;
+  /** 升级对话框的目标版本号。 */
+  appUpdateTargetVersion: string | null;
+  /** 关闭 / 重置升级对话框。 */
+  closeAppUpdateDialog: () => void;
+  /** 手动检测一次控制面板更新（设置区按钮）。 */
+  checkAppUpdate: () => Promise<void>;
 }
 
 export function usePanel(): Panel {
@@ -164,6 +175,9 @@ export function usePanel(): Panel {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   /** 最近一次插件更新检测结果（默认为当前插件 profile；周期/手动触发更新）。 */
   const [pluginUpdates, setPluginUpdates] = useState<PluginUpdates | null>(null);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateState | null>(null);
+  const [appUpdateDialogOpen, setAppUpdateDialogOpen] = useState(false);
+  const [appUpdateTargetVersion, setAppUpdateTargetVersion] = useState<string | null>(null);
   const [logDir, setLogDir] = useState("");
 
   /** 内嵌 DSH 原生 Webview 的 DOM 锚点（#tab-content-dsh），由 App 挂载。 */
@@ -212,6 +226,18 @@ export function usePanel(): Panel {
     // 点击「安装」/「查看安装指引」时会另行获取新鲜结果。
     void api.detectTools().then(setTools).catch(() => undefined);
     void api.getLogDir().then(setLogDir);
+    // 拉取一次控制面板自身更新状态：若已就绪（完整更新包在 update/），本次启动即升级。
+    // 与 `app-update-ready` 事件互补，覆盖事件先于监听注册的竞态。
+    void api
+      .getAppUpdateState()
+      .then((s) => {
+        setAppUpdate(s);
+        if (s.status === "ready") {
+          setAppUpdateTargetVersion(s.latestVersion);
+          setAppUpdateDialogOpen(true);
+        }
+      })
+      .catch(() => undefined);
     // 日志只展示本次会话：不加载历史文件，仅接收实时事件。
     const unsubs = [
       onLogLine((l) => setLogs((prev) => [...prev.slice(-(MAX_LOG - 1)), l])),
@@ -278,6 +304,12 @@ export function usePanel(): Panel {
         );
       }),
       onPluginUpdatesChecked((u) => setPluginUpdates(u)),
+      onAppUpdateState((s) => setAppUpdate(s)),
+      onAppUpdateReady((ver) => {
+        // 已有完整更新包：本次启动即进入升级（自动弹升级对话框）。
+        setAppUpdateTargetVersion(ver);
+        setAppUpdateDialogOpen(true);
+      }),
     ];
     return () => {
       for (const u of unsubs) void u.then((f) => f());
@@ -785,6 +817,29 @@ export function usePanel(): Panel {
     }
   }, [config?.pluginProfile, message, t]);
 
+  /** 手动检测一次控制面板更新（设置区按钮）；失败静默置状态。 */
+  const checkAppUpdate = useCallback(async () => {
+    try {
+      const s = await api.checkAppUpdate();
+      setAppUpdate(s);
+    } catch (e) {
+      const msg = String(e);
+      setAppUpdate((prev) => ({
+        status: "failed",
+        currentVersion: prev?.currentVersion ?? "",
+        latestVersion: prev?.latestVersion ?? null,
+        downloaded: 0,
+        total: 0,
+        error: msg,
+      }));
+    }
+  }, []);
+
+  const closeAppUpdateDialog = useCallback(() => {
+    setAppUpdateDialogOpen(false);
+    setAppUpdateTargetVersion(null);
+  }, []);
+
   return {
     config,
     detect,
@@ -828,5 +883,10 @@ export function usePanel(): Panel {
     appendLog,
     pluginUpdates,
     checkPluginUpdates,
+    appUpdate,
+    appUpdateDialogOpen,
+    appUpdateTargetVersion,
+    closeAppUpdateDialog,
+    checkAppUpdate,
   };
 }

@@ -197,6 +197,18 @@ pub fn build_preview_entries(
             items,
         });
     }
+    let backup = config::backup_dir();
+    if backup.exists() {
+        let (size, items) = stat_path(&backup);
+        entries.push(UninstallEntry {
+            id: "backup".into(),
+            name: crate::i18n::t_fmt("uninstall.backup_dir", &[&backup.to_string_lossy()]),
+            path: backup.to_string_lossy().to_string(),
+            kind: "directory".into(),
+            size,
+            items,
+        });
+    }
     entries
 }
 
@@ -211,6 +223,10 @@ pub fn list_preview_paths(kernels: &[config::KernelInstall], dsh_home: &str) -> 
     }
     if Path::new(dsh_home).exists() {
         v.push(dsh_home.to_string());
+    }
+    let backup = config::backup_dir();
+    if backup.exists() {
+        v.push(backup.to_string_lossy().to_string());
     }
     v
 }
@@ -248,6 +264,20 @@ fn build_preview_entries_progress(
             id: "dsh-home".into(),
             name: format!("DSH 用户数据目录（{dsh_home}）"),
             path: dsh_home.to_string(),
+            kind: "directory".into(),
+            size,
+            items,
+        });
+    }
+
+    let backup = config::backup_dir();
+    if backup.exists() {
+        let label = format!("备份目录（{}）", backup.display());
+        let (size, items) = stat_path_progress(&backup, &label, channel, cancel)?;
+        entries.push(UninstallEntry {
+            id: "backup".into(),
+            name: crate::i18n::t_fmt("uninstall.backup_dir", &[&backup.to_string_lossy()]),
+            path: backup.to_string_lossy().to_string(),
             kind: "directory".into(),
             size,
             items,

@@ -1,24 +1,27 @@
 // 插件管理对话框：已安装插件列表（可多选批量操作）/ 智能输入安装 / 单条与批量更新 /
-// 卸载 / 推荐插件链接。命令由后端直接在后台执行（无确认弹窗，过程实时见「执行详情」，
-// 自动处理 pnpm dsh 切换与构建拦截重试），完成后自动刷新列表。
+// 卸载 / 推荐插件链接。命令由后端直接在后台执行（无确认弹窗），执行过程以「阶段进度条」
+// 展示（后端推送 Phase 事件驱动；原始子进程输出只落盘到 logs/，不涌入前端），
+// 失败时进度条终止并在其下方给出精简错误。完成后自动刷新列表。
 // 更新检测内置网络重试：单项查询失败时按退坡间隔自动复查，不展示失败标记、不误报「无更新」。
 
 import {
   AppstoreOutlined,
   CloudSyncOutlined,
+  DownOutlined,
   LinkOutlined,
   LoadingOutlined,
   ReloadOutlined,
+  RightOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import {
   Alert,
   App,
   Button,
-  Collapse,
   Flex,
   Input,
   Modal,
+  Progress,
   Select,
   Space,
   Spin,
@@ -52,15 +55,18 @@ interface Props {
   onSaveSettings: (patch: Partial<AppConfig>) => Promise<void>;
 }
 
-/** 执行详情保留的最大行数。 */
-const MAX_DETAIL = 300;
-
 /** 更新检测失败后的自动复查间隔（毫秒）：8 秒 → 30 秒 → 2 分钟 → 10 分钟（封顶循环）。 */
 const UPDATE_RETRY_DELAYS_MS = [8_000, 30_000, 120_000, 600_000];
 
-interface DetailLine {
-  stream: string;
-  line: string;
+/** 插件操作的分阶段进度状态（由后端 Phase/error 事件驱动，最终状态由 runOp 依据结果设定）。 */
+interface OpProgress {
+  /** 当前阶段文字（进度条上方展示）。 */
+  label: string;
+  /** 里程碑百分比（0-100）。 */
+  percent: number;
+  status: "running" | "success" | "error";
+  /** 最终结果 / 精简失败信息（进度条下方展示）。 */
+  message: string | null;
 }
 
 export default function PluginManagerDialog({ open, config, webRunning, onClose, onSaveSettings }: Props) {
@@ -73,13 +79,10 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
   const [list, setList] = useState<PluginList | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [busyLabel, setBusyLabel] = useState<string | null>(null);
-  /** 后端实时推送的当前操作行（如「正在更新插件（2/5）：xxx」），优先于 busyLabel 展示。 */
-  const [activityLine, setActivityLine] = useState<string | null>(null);
+  /** 后端实时推送的分阶段进度（非空时展示进度条）。 */
+  const [op, setOp] = useState<OpProgress | null>(null);
   const [input, setInput] = useState("");
-  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
-  const [detail, setDetail] = useState<DetailLine[]>([]);
-  const [detailOpen, setDetailOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   /** 插件更新检测结果（按 key 索引）。 */
   const [updates, setUpdates] = useState<PluginUpdates | null>(null);
@@ -107,8 +110,6 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
   const retryTimer = useRef<number | null>(null);
   const retryAttempt = useRef(0);
   const checkUpdatesRef = useRef<((p: string) => Promise<void>) | null>(null);
-  /** 执行详情输出容器，用于自动滚动到最新一行（避免看起来「卡住」）。 */
-  const detailRef = useRef<HTMLDivElement | null>(null);
 
   const clearRetry = useCallback(() => {
     if (retryTimer.current !== null) {
@@ -160,20 +161,12 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
   // 卸载组件 / 关闭弹窗时清理待执行的复查定时器。
   useEffect(() => clearRetry, [clearRetry]);
 
-  // 执行详情有新增行时自动滚动到底部（进行中的命令逐行刷出，避免看起来卡住）。
-  useEffect(() => {
-    const el = detailRef.current;
-    if (el && detailOpen) el.scrollTop = el.scrollHeight;
-  }, [detail, detailOpen]);
-
   // 打开时：同步配置中的 profile 并加载列表，重置操作状态。
   // 仅在打开瞬间读取 config；之后 profile 变更由 saveProfile 自行保存并刷新。
   useEffect(() => {
     if (open) {
       setProfile(config?.pluginProfile || "web");
-      setResult(null);
-      setDetail([]);
-      setDetailOpen(false);
+      setOp(null);
       setInput("");
       setUpdates(null);
       clearRetry();
@@ -189,44 +182,50 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  /** 后端管道事件：收集输出行到执行详情；item-* 步骤事件为实时进度标题，顶部展示。 */
+  /** 后端管道事件：分阶段进度更新进度条；error 记录精简失败。
+   * 原始子进程输出（output/stepStarted 等）不再展示，直接忽略；
+   * finished 是逐条中间事件，不据此收尾（最终状态由 runOp 依据返回结果设定，
+   * 避免批量任务里进度条被某条成功提前抬到 100 而回落）。 */
   const onEvent = useCallback((e: PipelineEvent) => {
-    if (e.type === "output") {
-      setDetail((prev) => {
-        const next = [...prev, { stream: e.stream, line: e.line }];
-        return next.length > MAX_DETAIL ? next.slice(next.length - MAX_DETAIL) : next;
-      });
-    } else if (e.type === "stepStarted" && e.id.startsWith("item-")) {
-      setActivityLine(e.title);
+    if (e.type === "phase") {
+      setOp((prev) => (prev ? { ...prev, label: e.title, percent: e.percent } : prev));
+    } else if (e.type === "error") {
+      setOp((prev) => (prev ? { ...prev, status: "error", message: e.message } : prev));
     }
   }, []);
 
-  /** 通用操作包装：置忙 → 自动展开「执行详情」（可随时收起）→（若 web 运行则先自动停止）→
-   * 执行 → 结果提示 → 成功后清空输入并刷新列表，结束后（无论成败）若之前运行则自动重新启动 web。
-   * 返回执行结果（失败为 null）。 */
+  /** 通用操作包装：置忙 → （若 web 运行则先自动停止）→ 以分阶段进度条展示执行过程 →
+   * 结果提示（成功/失败显示在进度条下方）→ 成功后清空输入并刷新列表，
+   * 结束后（无论成败）若之前运行则自动重新启动 web。返回执行结果（失败为 null）。 */
   const runOp = useCallback(
     async (label: string, run: () => Promise<PluginOpResult>): Promise<PluginOpResult | null> => {
       setBusy(true);
-      setBusyLabel(label);
-      setActivityLine(null);
-      setResult(null);
-      setDetail([]);
-      setDetailOpen(true);
+      setOp({ label, percent: 0, status: "running", message: null });
       const wasRunning = webRunning;
       try {
         if (wasRunning) {
           await api.stopWeb();
         }
         const r = await run();
-        setResult({ ok: r.ok, message: r.message });
+        setOp((prev) => ({
+          ...(prev ?? { label, percent: 0, status: "running", message: null }),
+          status: r.ok ? "success" : "error",
+          message: r.message,
+          percent: r.ok ? 100 : prev?.percent ?? 0,
+          label: r.ok ? t("plugin.progress.done") : t("plugin.progress.error"),
+        }));
         if (r.ok) {
           setInput("");
           await loadList(profile);
         }
         return r;
       } catch (e) {
-        setResult({ ok: false, message: String(e) });
-        setDetailOpen(true);
+        setOp((prev) => ({
+          label: t("plugin.progress.error"),
+          percent: prev?.percent ?? 0,
+          status: "error",
+          message: String(e),
+        }));
         return null;
       } finally {
         // 操作前停掉了 web，操作后自动恢复；不设置 startedByUs，避免自动打开 DSH Tab。
@@ -234,15 +233,13 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           api.startWeb(null, () => undefined).catch(() => undefined);
         }
         setBusy(false);
-        setBusyLabel(null);
-        setActivityLine(null);
       }
     },
-    [loadList, profile, webRunning],
+    [loadList, profile, webRunning, t],
   );
 
   /** 智能安装：输入由后端解析（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。
-   * busyLabel 带上输入内容，顶部显示「正在安装插件：<输入>」。 */
+   * 初始 label 为「正在安装插件：<输入>」，随后由后端 Phase 事件驱动细化。 */
   const install = useCallback(() => {
     const value = input.trim();
     if (!value) {
@@ -254,7 +251,7 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
     );
   }, [input, profile, onEvent, runOp, message, t]);
 
-  /** 更新单个插件：直接后台执行，过程见「执行详情」。 */
+  /** 更新单个插件：直接后台执行，过程见进度条。 */
   const updateOne = useCallback(
     (entry: PluginEntry) => {
       void runOp(t("plugin.op.update"), () => api.pluginUpdate([entry.key], profile, onEvent));
@@ -397,11 +394,7 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
       width: 140,
       render: (_, record) => (
         <Space size={4}>
-          <Button
-            size="small"
-            disabled={busy}
-            onClick={() => updateOne(record)}
-          >
+          <Button size="small" disabled={busy} onClick={() => updateOne(record)}>
             {t("plugin.update")}
           </Button>
           <Button
@@ -455,42 +448,91 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
           </Tooltip>
         </Flex>
 
-        {busy && (
-          <Alert
-            type="info"
-            icon={<LoadingOutlined spin style={{ fontSize: 22 }} />}
-            message={
-              <Flex align="center" gap={8} wrap>
-                <Typography.Text strong style={{ fontSize: 14 }}>
-                  {activityLine ?? t("plugin.busy.msg", { 0: busyLabel ?? "…" })}
-                </Typography.Text>
-                <Tag color="processing">{t("plugin.busy.running")}</Tag>
-              </Flex>
-            }
-            description={
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {t("plugin.busy.desc")}
+        {/* 操作进度：阶段文字 + 进度条；失败/成功信息在进度条下方展示 */}
+        {op && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <Flex align="center" gap={8} wrap>
+              <Typography.Text strong style={{ fontSize: 14 }}>
+                {op.label}
               </Typography.Text>
-            }
-          />
-        )}
-        {result && (
-          <Alert
-            type={result.ok ? "success" : "error"}
-            showIcon
-            message={result.message}
-            closable
-            onClose={() => setResult(null)}
-          />
+              {op.status === "running" ? (
+                <Tag color="processing" icon={<LoadingOutlined spin />}>
+                  {t("plugin.busy.running")}
+                </Tag>
+              ) : op.status === "success" ? (
+                <Tag color="success">{t("plugin.progress.done")}</Tag>
+              ) : (
+                <Tag color="error">{t("plugin.progress.error")}</Tag>
+              )}
+            </Flex>
+            <Progress
+              size="small"
+              status={
+                op.status === "running"
+                  ? "active"
+                  : op.status === "error"
+                    ? "exception"
+                    : "success"
+              }
+              percent={op.percent}
+            />
+            {op.status === "error" && op.message && (
+              <Alert
+                type="error"
+                showIcon
+                message={op.message}
+                closable
+                onClose={() => setOp((prev) => (prev ? { ...prev, message: null } : prev))}
+              />
+            )}
+            {op.status === "success" && op.message && (
+              <Alert
+                type="success"
+                showIcon
+                message={op.message}
+                closable
+                onClose={() => setOp((prev) => (prev ? { ...prev, message: null } : prev))}
+              />
+            )}
+          </div>
         )}
 
-        {/* 安装指引：新手友好的完整示例列表 */}
-        <Alert
-          type="info"
-          showIcon
-          message={t("plugin.guide.title")}
-          description={
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.9 }}>
+        {/* 安装指引：默认收起为一行，点击向下展开（不弹对话框） */}
+        <div
+          onClick={() => setGuideOpen((v) => !v)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            cursor: "pointer",
+            padding: "8px 12px",
+            border: `1px solid ${token.colorBorderSecondary}`,
+            borderRadius: 8,
+            background: token.colorFillQuaternary,
+          }}
+        >
+          {guideOpen ? (
+            <DownOutlined style={{ fontSize: 12, color: token.colorTextSecondary }} />
+          ) : (
+            <RightOutlined style={{ fontSize: 12, color: token.colorTextSecondary }} />
+          )}
+          <Typography.Text strong style={{ fontSize: 13 }}>
+            {guideOpen ? t("plugin.guide.collapse") : t("plugin.guide.expand")}
+          </Typography.Text>
+        </div>
+        {guideOpen && (
+          <div
+            style={{
+              padding: "10px 12px",
+              border: `1px solid ${token.colorBorderSecondary}`,
+              borderRadius: 8,
+              background: token.colorBgContainer,
+            }}
+          >
+            <Typography.Text type="secondary" style={{ fontSize: 13, lineHeight: 1.8 }}>
+              {t("plugin.guide.title")}
+            </Typography.Text>
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12, lineHeight: 1.9 }}>
               {(
                 [
                   ["plugin.guide.npm.label", "plugin.guide.npm.example"],
@@ -508,8 +550,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
                 </li>
               ))}
             </ul>
-          }
-        />
+          </div>
+        )}
 
         {/* 安装输入 + 推荐链接 */}
         <Flex gap={8} align="center" wrap>
@@ -622,63 +664,6 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
             {t("plugin.refresh")}
           </Button>
         </Flex>
-
-        {/* 执行详情 */}
-        <Collapse
-          ghost
-          items={[
-            {
-              key: "detail",
-              label: t("plugin.detail", { 0: detail.length }),
-              children: (
-                <div style={{ marginTop: 8 }}>
-                  <Flex align="center" gap={8} style={{ marginBottom: 4 }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      {t("plugin.busy.live")}
-                    </Typography.Text>
-                    {busy && <Tag color="processing">{t("plugin.busy.running")}</Tag>}
-                  </Flex>
-                  <div
-                    ref={detailRef}
-                    style={{
-                      maxHeight: 220,
-                      overflowY: "auto",
-                      fontSize: 12,
-                      lineHeight: 1.6,
-                      margin: 0,
-                      padding: 8,
-                      border: `1px solid ${token.colorBorderSecondary}`,
-                      borderRadius: 6,
-                      background: token.colorBgContainer,
-                      color: token.colorText,
-                      fontFamily:
-                        "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {detail.length === 0
-                      ? t("plugin.detail.empty")
-                      : detail.map((d, i) => (
-                          <div
-                            key={i}
-                            style={
-                              d.stream === "stderr"
-                                ? { color: token.colorError, fontStyle: "italic" }
-                                : undefined
-                            }
-                          >
-                            {d.line || "\u00A0"}
-                          </div>
-                        ))}
-                  </div>
-                </div>
-              ),
-            },
-          ]}
-          activeKey={detailOpen ? ["detail"] : []}
-          onChange={(k) => setDetailOpen(Array.isArray(k) && k.includes("detail"))}
-        />
       </Space>
     </Modal>
   );

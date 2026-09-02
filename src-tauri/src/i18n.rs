@@ -137,7 +137,7 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "无法读取已安装版本，无法比对更新",
             "Cannot read the installed version; update comparison unavailable.",
         ),
-        // ── 插件批量操作的实时进度标题（经 StepStarted 事件推送，前端顶部展示） ──
+        // ── 插件批量操作的实时进度标题（经 Phase 事件推送，前端进度条展示） ──
         "plugin.progress.updating" => (
             "正在更新插件（{0}/{1}）：{2}",
             "Updating plugins ({0}/{1}): {2}",
@@ -154,7 +154,7 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "plugin.op.remove" => ("卸载插件", "Remove plugin"),
         "plugin.op.repair" => ("修复 profile", "Repair profile"),
         "plugin.op.ok" => ("{0}成功：{1}", "{0} succeeded: {1}"),
-        "plugin.op.failed" => ("{0}失败（退出码 {1}）：{2}", "{0} failed (exit code {1}): {2}"),
+        "plugin.op.failed" => ("{0}失败：{1}", "{0} failed: {1}"),
         "plugin.op.no.output" => ("（无输出）", "(no output)"),
         "plugin.op.dsh.switch" => (
             "检测到「dsh」命令无法识别，已自动改用 pnpm dsh 执行（已保存到配置，后续命令保持一致）",
@@ -173,6 +173,23 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "plugin.op.builds.note2" => (
             "检测到 pnpm 拦截插件构建脚本（包 {0} 已在 allowBuilds 中），正在自动重试",
             "pnpm blocked plugin build scripts ({0} is already in allowBuilds); retrying automatically.",
+        ),
+        // ── 插件管理的分阶段进度文案（经 Phase 事件推送给前端进度条） ──
+        "plugin.phase.prepare" => ("正在准备运行环境…", "Preparing the runtime…"),
+        "plugin.phase.install" => ("正在安装插件：{0}", "Installing plugin: {0}"),
+        "plugin.phase.update" => ("正在更新插件：{0}", "Updating plugin: {0}"),
+        "plugin.phase.remove" => ("正在卸载插件：{0}", "Removing plugin: {0}"),
+        "plugin.phase.switch.dsh" => (
+            "检测到 dsh 命令无法识别，正在改用 pnpm dsh 执行…",
+            "\"dsh\" is not recognized; switching to `pnpm dsh`…",
+        ),
+        "plugin.phase.builds.note1" => (
+            "正在将 {0} 加入 profile 的 allowBuilds 白名单…",
+            "Adding {0} to the profile's allowBuilds allowlist…",
+        ),
+        "plugin.phase.builds.note2" => (
+            "{0} 已在 allowBuilds 白名单中，正在重试…",
+            "{0} is already in allowBuilds; retrying…",
         ),
         // ── 修复安装 ──
         "repair.env.missing" => (
@@ -207,6 +224,10 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "uninstall.scan.cancelled" => (
             "已取消统计",
             "Scan cancelled",
+        ),
+        "uninstall.backup_dir" => (
+            "备份目录（{0}）",
+            "Backup directory ({0})",
         ),
         // ── 步骤标题（与前端 i18n.ts 的 step.* 一一对应）──
         "step.clone" => ("克隆仓库（git clone）", "Clone repository (git clone)"),
@@ -263,8 +284,12 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         ),
         "log.update_done" => ("✅ 更新完成", "✅ Update complete"),
         "log.plugin_op_start" => (
-            "🔌 {0}: {1}（目录 {2}）",
-            "🔌 {0}: {1} (directory {2})",
+            "🔌 正在{0}：{1}",
+            "🔌 {0} started: {1}",
+        ),
+        "log.source.plugin" => (
+            "插件管理",
+            "Plugin",
         ),
         "log.uninstall_delete" => ("🗑 删除 {0}", "🗑 Deleting {0}"),
         "log.uninstall_delete_failed" => (
@@ -395,6 +420,37 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
         "web.quick_exit" => (
             "DeepSeek Harness 启动后立即退出（退出码 {0}）。请查看下方日志中的错误输出；若与 profile 插件/依赖有关，可执行「修复安装」。",
             "DeepSeek Harness exited right after starting (exit code {0}). Check the error output in the log below; if it is related to profile plugins or dependencies, run \"Repair Install\".",
+        ),
+        // ── 控制面板自身更新 ──
+        "app_update.phase.extract" => ("正在解压更新包…", "Extracting the update package…"),
+        "app_update.phase.script" => ("正在生成更新脚本…", "Generating the update script…"),
+        "app_update.stage_missing_exe" => (
+            "更新包中缺少 DSH-Control-Panel.exe，更新已中止。",
+            "The update package is missing DSH-Control-Panel.exe; the update was aborted.",
+        ),
+        "app_update.no_ready" => ("没有可用的更新包", "No update package is available."),
+        "app_update.no_script" => (
+            "未找到更新脚本，无法启动更新。",
+            "The update script was not found; cannot start the update.",
+        ),
+        "log.app_update_check_fail" => (
+            "⚠ 检测控制面板更新失败：{0}（已静默处理，不影响使用）",
+            "⚠ Failed to check for control panel updates: {0} (handled silently)"),
+        "log.app_update_download_start" => (
+            "⬇ 检测到控制面板新版本 {0}，已开始后台下载…",
+            "⬇ New control panel version {0} found; downloading in the background…",
+        ),
+        "log.app_update_download_done" => (
+            "✅ 控制面板新版本 {0} 已下载完成，将在下次启动时更新。",
+            "✅ Control panel version {0} downloaded; it will be applied on next launch.",
+        ),
+        "log.app_update_download_fail" => (
+            "⚠ 控制面板更新下载失败：{0}（已静默处理）",
+            "⚠ Failed to download the control panel update: {0} (handled silently)",
+        ),
+        "log.app_update_ready" => (
+            "🔄 更新就绪，已生成更新脚本（暂存 {0} → 脚本 {1}）",
+            "🔄 Update ready; update script generated (stage {0} → script {1})",
         ),
         _ => return None,
     })

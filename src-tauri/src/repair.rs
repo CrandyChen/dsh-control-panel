@@ -123,7 +123,7 @@ fn run_step(
         "log.step_start",
         &[&title, programs[0], &argv.join(" ")],
     ));
-    let outcome = plugin::run_capture(programs, argv, cwd, envs, step_id, channel)?;
+    let outcome = plugin::run_capture(programs, argv, cwd, envs, step_id, channel, logger, true, "")?;
     let _ = channel.send(PipelineEvent::StepFinished {
         id: step_id.into(),
         exit_code: outcome.exit_code,
@@ -309,6 +309,11 @@ fn repair_profiles(app: &AppHandle, channel: &Channel<PipelineEvent>, logger: &L
             &format!("profile {name}"),
             channel,
             logger,
+            plugin::PluginOpOpts {
+                emit_output: true,
+                report_main: false,
+                ..Default::default()
+            },
         ) {
             Ok(_) => logger.info(&crate::i18n::t_fmt("log.repair_profile_ok", &[&name])),
             Err(e) => logger.warn(&crate::i18n::t_fmt(

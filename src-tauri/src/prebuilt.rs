@@ -444,38 +444,18 @@ pub fn download_asset(
 /// 读取 zip 的未压缩总大小与条目数（经典 zip 中央目录；zip64 / 损坏时返回 None）。
 /// 仅用于解压进度展示。
 pub fn zip_uncompressed_totals(zip: &Path) -> Option<(u32, u64)> {
-    let data = std::fs::read(zip).ok()?;
-    if data.len() < 22 {
-        return None;
-    }
-    // 从末尾向前查找 EOCD 签名 PK\x05\x06（0x06054b50）。
-    let search_start = data.len().saturating_sub(22 + 65535);
-    let mut eocd = None;
-    let mut i = data.len() - 22;
-    loop {
-        if data[i..i + 4] == [0x50, 0x4b, 0x05, 0x06] {
-            eocd = Some(i);
-            break;
-        }
-        if i == search_start {
-            break;
-        }
-        i -= 1;
-    }
-    let eocd = eocd?;
-    let total_entries = u16::from_le_bytes([data[eocd + 10], data[eocd + 11]]) as u32;
-    let cd_offset = u32::from_le_bytes([
-        data[eocd + 16],
-        data[eocd + 17],
-        data[eocd + 18],
-        data[eocd + 19],
-    ]) as usize;
+    let entries = zip_entry_names(zip)?;
+    // 统计：条目数 + 累计未压缩大小。
     let mut total_size: u64 = 0;
     let mut count: u32 = 0;
+    // zip_entry_names 已按中央目录可靠性解析；此处按条目顺序统计无法直接拿到
+    // 每个文件的大小，因此用中央目录二进制再扫一遍（与旧实现一致的解析）。
+    let data = std::fs::read(zip).ok()?;
+    let (_eocd, cd_offset) = zip_central_dir_data(&data)?;
     let mut off = cd_offset;
-    for _ in 0..total_entries {
+    for _ in 0..data.len() {
         if off + 46 > data.len() || data[off..off + 4] != [0x50, 0x4b, 0x01, 0x02] {
-            return None;
+            break;
         }
         let uncompressed = u32::from_le_bytes([
             data[off + 24],
@@ -490,7 +470,79 @@ pub fn zip_uncompressed_totals(zip: &Path) -> Option<(u32, u64)> {
         count += 1;
         off += 46 + fn_len + extra_len + comment_len;
     }
-    Some((count, total_size))
+    if count == 0 || entries.is_empty() {
+        None
+    } else {
+        Some((count, total_size))
+    }
+}
+
+/// 定位 zip 中央目录（EOCD 的 CD offset），损坏时返回 None。
+fn zip_central_dir_data(data: &[u8]) -> Option<(usize, usize)> {
+    if data.len() < 22 {
+        return None;
+    }
+    let search_start = data.len().saturating_sub(22 + 65535);
+    let mut i = data.len() - 22;
+    loop {
+        if data[i..i + 4] == [0x50, 0x4b, 0x05, 0x06] {
+            let cd_offset = u32::from_le_bytes([
+                data[i + 16],
+                data[i + 17],
+                data[i + 18],
+                data[i + 19],
+            ]) as usize;
+            return Some((i, cd_offset));
+        }
+        if i == search_start {
+            break;
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// 列出 zip 中央目录中的条目名（损坏 / zip64 / 空则返回 None）。
+pub fn zip_entry_names(zip: &Path) -> Option<Vec<String>> {
+    let data = std::fs::read(zip).ok()?;
+    if data.len() < 22 {
+        return None;
+    }
+    let (_, cd_offset) = zip_central_dir_data(&data)?;
+    let mut names = Vec::new();
+    let mut off = cd_offset;
+    for _ in 0..data.len() {
+        if off + 46 > data.len() || data[off..off + 4] != [0x50, 0x4b, 0x01, 0x02] {
+            break;
+        }
+        let fn_len = u16::from_le_bytes([data[off + 28], data[off + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([data[off + 30], data[off + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([data[off + 32], data[off + 33]]) as usize;
+        if off + 46 + fn_len > data.len() {
+            break;
+        }
+        let name = String::from_utf8_lossy(&data[off + 46..off + 46 + fn_len]).to_string();
+        names.push(name);
+        off += 46 + fn_len + extra_len + comment_len;
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
+}
+
+/// 判断 zip 是否包含文件名为 `target` 的条目（大小写不敏感，按末级文件名匹配，
+/// 兼容 zip 顶层带包装目录的情况）。
+pub fn zip_has_entry(zip: &Path, target: &str) -> bool {
+    zip_entry_names(zip)
+        .map(|names| {
+            names.iter().any(|n| {
+                let base = n.rsplit(['/', '\\']).next().unwrap_or(n);
+                base.eq_ignore_ascii_case(target)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// 递归统计目录下所有文件字节数之和（解压进度用；符号链接按目标大小近似）。
@@ -797,5 +849,24 @@ mod tests {
     fn zip_uncompressed_totals_missing_file_is_none() {
         let zip = std::env::temp_dir().join(format!("dsh-zip-missing-{}.zip", std::process::id()));
         assert_eq!(zip_uncompressed_totals(&zip), None);
+    }
+
+    #[test]
+    fn zip_has_entry_matches_basename_any_folder() {
+        let zip = std::env::temp_dir().join(format!("dsh-zip-has-{}.zip", std::process::id()));
+        // 兼容 zip 顶层带包装目录的情况：按末级文件名匹配。
+        let bytes = build_test_zip(&[
+            (
+                "DSH-Control-Panel-portable-2.4.0-windows-x64/DSH-Control-Panel.exe",
+                &[0u8; 4],
+            ),
+            ("DSH-Control-Panel-portable-2.4.0-windows-x64/README.txt", b"readme"),
+        ]);
+        std::fs::write(&zip, bytes).unwrap();
+        assert!(zip_has_entry(&zip, "dsh-control-panel.exe"));
+        assert!(zip_has_entry(&zip, "README.txt"));
+        assert!(!zip_has_entry(&zip, "other.exe"));
+        assert!(!zip_has_entry(&zip, "DSH-Control-Panel-portable-2.4.0-windows-x64"));
+        std::fs::remove_file(&zip).ok();
     }
 }

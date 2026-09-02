@@ -849,7 +849,9 @@ pub(crate) struct RunOutcome {
     pub(crate) output: String,
 }
 
-/// 执行单个命令：输出行流式转发到 channel，并保留最近若干行用于失败分析。
+/// 执行单个命令：输出行流式转发到 channel（`forward_output=true`），
+/// 或仅落盘为带来源标记的详细日志（`forward_output=false`，用于插件管理等
+/// 只展示进度的流程，避免原始输出涌入前端）。两种情况下都保留最近若干行用于失败分析。
 pub(crate) fn run_capture(
     programs: &[&str],
     argv: &[String],
@@ -857,6 +859,9 @@ pub(crate) fn run_capture(
     envs: &[(&str, String)],
     step_id: &str,
     channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+    forward_output: bool,
+    source: &str,
 ) -> Result<RunOutcome, String> {
     let mut child = spawn_any(programs, argv, Some(&cwd.to_path_buf()), envs).map_err(|e| e.friendly())?;
     let stdout = child.stdout.take();
@@ -865,15 +870,21 @@ pub(crate) fn run_capture(
     let kept: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let ch = channel.clone();
     let sid = step_id.to_string();
+    let logger1 = logger.clone();
+    let src1 = source.to_string();
     let kept1 = kept.clone();
     if let Some(out) = stdout {
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
-                let _ = ch.send(PipelineEvent::Output {
-                    step: sid.clone(),
-                    stream: "stdout".into(),
-                    line: line.clone(),
-                });
+                if forward_output {
+                    let _ = ch.send(PipelineEvent::Output {
+                        step: sid.clone(),
+                        stream: "stdout".into(),
+                        line: line.clone(),
+                    });
+                } else {
+                    logger1.file_only_tagged(&src1, "INFO", &line);
+                }
                 let mut v = kept1.lock().unwrap();
                 v.push(line);
                 if v.len() > MAX_KEPT_LINES {
@@ -884,15 +895,21 @@ pub(crate) fn run_capture(
     }
     let ch = channel.clone();
     let sid = step_id.to_string();
+    let logger2 = logger.clone();
+    let src2 = source.to_string();
     let kept2 = kept.clone();
     if let Some(err) = stderr {
         std::thread::spawn(move || {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
-                let _ = ch.send(PipelineEvent::Output {
-                    step: sid.clone(),
-                    stream: "stderr".into(),
-                    line: line.clone(),
-                });
+                if forward_output {
+                    let _ = ch.send(PipelineEvent::Output {
+                        step: sid.clone(),
+                        stream: "stderr".into(),
+                        line: line.clone(),
+                    });
+                } else {
+                    logger2.file_only_tagged(&src2, "WARN", &line);
+                }
                 let mut v = kept2.lock().unwrap();
                 v.push(line);
                 if v.len() > MAX_KEPT_LINES {
@@ -949,11 +966,82 @@ fn dsh_plugin_invocation(
     }
 }
 
+/// 操作阶段对应的「正在执行」文案 key（安装 / 更新 / 卸载）。
+fn phase_key_for_action(action_key: &str) -> &str {
+    match action_key {
+        "plugin.op.update" => "plugin.phase.update",
+        "plugin.op.remove" => "plugin.phase.remove",
+        _ => "plugin.phase.install",
+    }
+}
+
+/// `run_plugin_op` 的行为选项。
+#[derive(Clone)]
+pub struct PluginOpOpts {
+    /// 整体进度的起始百分比（批量任务按条目切分，单次为 0）。
+    pub progress_base: u8,
+    /// 整体进度的区间宽度（单次为 100）。
+    pub progress_span: u8,
+    /// 是否把原始子进程输出流式推送到 channel（修复等流程 true；插件管理 false）。
+    pub emit_output: bool,
+    /// 是否把友好的开始 / 结果日志写入主窗口（插件管理 true；修复流程自行记录日志为 false）。
+    pub report_main: bool,
+}
+
+impl Default for PluginOpOpts {
+    fn default() -> Self {
+        Self {
+            progress_base: 0,
+            progress_span: 100,
+            emit_output: false,
+            report_main: true,
+        }
+    }
+}
+
+/// 分阶段进度跟踪器：把单调递增的本地百分比映射到批量操作的某一区间，
+/// 并推送 `Phase` 事件 + 落盘带来源标记的阶段日志。
+struct PhaseTracker {
+    base: u8,
+    span: u8,
+    local: u8,
+    source: String,
+}
+
+/// 由 `base`（区间起点）、`span`（区间宽度）与单调递增的 `local`（0-100）计算整体百分比。
+/// `local` 到达 100 时落在 `base + span`；结果封顶 100。
+fn progress_percent(base: u8, span: u8, local: u8) -> u8 {
+    (base as u32 + (span as u32 * local as u32) / 100).min(100) as u8
+}
+
+impl PhaseTracker {
+    fn new(base: u8, span: u8, source: String) -> Self {
+        Self { base, span, local: 0, source }
+    }
+
+    /// 记录某阶段（本地百分比只增不减），推送事件并落盘。
+    fn emit(&mut self, channel: &Channel<PipelineEvent>, logger: &Logger, title: &str, local: u8) {
+        if local > self.local {
+            self.local = local;
+        }
+        let pct = progress_percent(self.base, self.span, self.local);
+        let _ = channel.send(PipelineEvent::Phase {
+            title: title.to_string(),
+            percent: pct,
+        });
+        logger.file_only_tagged(&self.source, "INFO", &format!("[Phase] {title}"));
+    }
+}
+
 /// 执行一次 `dsh plugin --profile <profile> <args>` 操作（按安装方式分派命令）。
 ///
 /// 失败自动重试（最多各一次）：
 /// - 全局 `dsh` 不可识别 → 切换为 `pnpm dsh`（写回配置；仅源码模式）；
 /// - pnpm 拦截构建脚本 → 为 profile 配置 allowBuilds 并重试。
+///
+/// 进度以分阶段 `Phase` 事件推送前端；`opts.emit_output` 决定原始子进程输出是否
+/// 流入 channel（否则带 `[插件管理]` 来源标记落盘进入合并日志）。`opts.report_main`
+/// 决定是否把友好的开始 / 结果日志写入主窗口（否则仅落盘）。
 pub fn run_plugin_op(
     app: &AppHandle,
     profile: &str,
@@ -962,6 +1050,7 @@ pub fn run_plugin_op(
     subject: &str,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
+    opts: PluginOpOpts,
 ) -> Result<PluginOpResult, String> {
     let action_label = crate::i18n::t(action_key);
     let cfg: AppConfig = config::load_config(app);
@@ -978,52 +1067,68 @@ pub fn run_plugin_op(
     } else if !crate::detect::is_valid_prebuilt(&cwd) {
         return Err(AppError::NotInstalled.friendly());
     }
-    // 运行环境（node/pnpm）就绪，供 dsh / pnpm 命令使用；失败即中止（不降级系统 node）。
-    crate::runtime::ensure_runtime(channel, logger)?;
     let pdir = profile_dir(profile)?;
 
-    let display = if mode == "prebuilt" {
-        format!("node_modules\\.bin\\dsh.cmd plugin --profile {profile} {}", args.join(" "))
-    } else {
-        format!("dsh plugin --profile {profile} {}", args.join(" "))
-    };
-    logger.info(&crate::i18n::t_fmt(
-        "log.plugin_op_start",
-        &[&action_label, &display, &install_dir],
-    ));
+    let source = crate::i18n::t("log.source.plugin");
+    let mut tracker = PhaseTracker::new(opts.progress_base, opts.progress_span, source.clone());
 
+    // 开始：主窗口记录友好文案（不展示原始命令 / 目录）；修复流程只落盘。
+    let start_msg = crate::i18n::t_fmt("log.plugin_op_start", &[&action_label, subject]);
+    if opts.report_main {
+        logger.info(&start_msg);
+    } else {
+        logger.file_only_tagged(&source, "INFO", &start_msg);
+    }
+    // 准备运行环境阶段：先把进度给到区间内的 10%。
+    tracker.emit(channel, logger, &crate::i18n::t("plugin.phase.prepare"), 10);
+    // 运行环境（node/pnpm）就绪，供 dsh / pnpm 命令使用；失败即中止（不降级系统 node）。
+    crate::runtime::ensure_runtime(channel, logger)?;
+
+    let op_phase_key = phase_key_for_action(action_key);
     let mut use_pnpm = cfg.use_pnpm_dsh;
     let mut bypass_builds: u8 = 0;
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let step_id = format!("plugin-{attempt}");
-        let title = format!("{action_label} ({display})");
-        let _ = channel.send(PipelineEvent::StepStarted {
-            id: step_id.clone(),
-            title: title.clone(),
-        });
+        // 第一次执行在区间 40%，重试抬到 85%（单调递增）。
+        let op_local = if attempt >= 2 { 85 } else { 40 };
+        tracker.emit(channel, logger, &crate::i18n::t_fmt(op_phase_key, &[subject]), op_local);
 
         let (programs_vec, argv) =
             dsh_plugin_invocation(&cwd, profile, args, use_pnpm, &mode);
         let program_refs: Vec<&str> = programs_vec.iter().map(|s| s.as_str()).collect();
 
-        let outcome = match run_capture(&program_refs, &argv, &cwd, &[], &step_id, channel) {
+        let step_id = format!("plugin-{attempt}");
+        let outcome = match run_capture(
+            &program_refs,
+            &argv,
+            &cwd,
+            &[],
+            &step_id,
+            channel,
+            logger,
+            opts.emit_output,
+            &source,
+        ) {
             Ok(o) => o,
             Err(e) => {
                 let _ = channel.send(PipelineEvent::Error { message: e.clone() });
-                logger.error(&e);
+                if opts.report_main {
+                    logger.error(&e);
+                } else {
+                    logger.file_only_tagged(&source, "ERROR", &e);
+                }
                 return Err(e);
             }
         };
-        let _ = channel.send(PipelineEvent::StepFinished {
-            id: step_id,
-            exit_code: outcome.exit_code,
-        });
 
         if outcome.ok {
             let msg = crate::i18n::t_fmt("plugin.op.ok", &[&action_label, subject]);
-            logger.info(&msg);
+            if opts.report_main {
+                logger.info(&msg);
+            } else {
+                logger.file_only_tagged(&source, "INFO", &msg);
+            }
             let _ = channel.send(PipelineEvent::Finished { ok: true });
             return Ok(PluginOpResult {
                 ok: true,
@@ -1038,15 +1143,15 @@ pub fn run_plugin_op(
             let mut cfg2 = config::load_config(app);
             cfg2.use_pnpm_dsh = true;
             if let Err(e) = config::save_config(app, &cfg2) {
-                logger.warn(&crate::i18n::t_fmt("plugin.op.dsh.switch.savefail", &[&e]));
+                logger.file_only_tagged(
+                    &source,
+                    "WARN",
+                    &crate::i18n::t_fmt("plugin.op.dsh.switch.savefail", &[&e]),
+                );
             }
             let note = crate::i18n::t("plugin.op.dsh.switch");
-            logger.warn(&note);
-            let _ = channel.send(PipelineEvent::Output {
-                step: "panel".into(),
-                stream: "stderr".into(),
-                line: note.into(),
-            });
+            logger.file_only_tagged(&source, "WARN", &note);
+            tracker.emit(channel, logger, &crate::i18n::t("plugin.phase.switch.dsh"), 55);
             continue;
         }
         // 失败 2：pnpm 拦截构建脚本 → 把被拦截的包显式加入 allowBuilds 后重试。
@@ -1057,27 +1162,27 @@ pub fn run_plugin_op(
             bypass_builds += 1;
             let packages = parse_blocked_packages(&outcome.output);
             if packages.is_empty() {
-                logger.warn(&crate::i18n::t("plugin.op.builds.parse"));
+                logger.file_only_tagged(&source, "WARN", &crate::i18n::t("plugin.op.builds.parse"));
             } else {
                 let changed = match ensure_allow_builds(&pdir, &packages.iter().map(String::as_str).collect::<Vec<_>>()) {
                     Ok(c) => c,
                     Err(e) => {
-                        logger.warn(&crate::i18n::t_fmt("plugin.op.builds.writefail", &[&e]));
+                        logger.file_only_tagged(
+                            &source,
+                            "WARN",
+                            &crate::i18n::t_fmt("plugin.op.builds.writefail", &[&e]),
+                        );
                         false
                     }
                 };
                 let joined = packages.join("、");
                 let note = if changed {
-                    crate::i18n::t_fmt("plugin.op.builds.note1", &[&joined])
+                    crate::i18n::t_fmt("plugin.phase.builds.note1", &[&joined])
                 } else {
-                    crate::i18n::t_fmt("plugin.op.builds.note2", &[&joined])
+                    crate::i18n::t_fmt("plugin.phase.builds.note2", &[&joined])
                 };
-                logger.warn(&note);
-                let _ = channel.send(PipelineEvent::Output {
-                    step: "panel".into(),
-                    stream: "stderr".into(),
-                    line: note.clone(),
-                });
+                logger.file_only_tagged(&source, "WARN", &note);
+                tracker.emit(channel, logger, &note, 70);
                 continue;
             }
         }
@@ -1108,11 +1213,14 @@ pub fn run_plugin_op(
         } else {
             last.to_string()
         };
-        let msg = crate::i18n::t_fmt(
-            "plugin.op.failed",
-            &[&action_label, &outcome.exit_code.to_string(), &last],
-        );
-        logger.error(&msg);
+        // 主窗口只给出简明的失败结果（退出码与完整输出留在日志文件的详细记录里）；
+        // 进度条停在当前百分比，错误信息由前端展示在进度条下方。
+        let msg = crate::i18n::t_fmt("plugin.op.failed", &[&action_label, &last]);
+        if opts.report_main {
+            logger.error(&msg);
+        } else {
+            logger.file_only_tagged(&source, "ERROR", &msg);
+        }
         let _ = channel.send(PipelineEvent::Error { message: msg.clone() });
         return Err(msg);
     }
@@ -1455,6 +1563,34 @@ mod tests {
 
     fn tmp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("dsh-plugin-{name}-{}", std::process::id()))
+    }
+
+    // ---------- 分阶段进度 ----------
+
+    #[test]
+    fn progress_percent_is_monotonic_and_capped() {
+        // 单次操作（base=0, span=100），local 递增映射到整体 0-100。
+        assert_eq!(progress_percent(0, 100, 10), 10);
+        assert_eq!(progress_percent(0, 100, 55), 55);
+        assert_eq!(progress_percent(0, 100, 100), 100);
+        // 批量：base/span 切分后仍在区间内，且不越界。
+        // 3 条任务：base=66, span=34 → local 100 时恰为 100。
+        assert_eq!(progress_percent(0, 33, 100), 33);
+        assert_eq!(progress_percent(33, 33, 100), 66);
+        assert_eq!(progress_percent(66, 34, 100), 100);
+        // local 单调且较大时不会回落（如区间内再变化）。
+        assert!(progress_percent(66, 34, 40) >= progress_percent(66, 34, 10));
+        // 封顶 100，不溢出。
+        assert_eq!(progress_percent(90, 30, 100), 100);
+        assert!(progress_percent(0, 100, 100) <= 100);
+    }
+
+    #[test]
+    fn phase_key_maps_actions() {
+        assert_eq!(phase_key_for_action("plugin.op.install"), "plugin.phase.install");
+        assert_eq!(phase_key_for_action("plugin.op.update"), "plugin.phase.update");
+        assert_eq!(phase_key_for_action("plugin.op.remove"), "plugin.phase.remove");
+        assert_eq!(phase_key_for_action("unknown"), "plugin.phase.install");
     }
 
     // ---------- profile_dir ----------

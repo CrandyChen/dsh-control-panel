@@ -119,7 +119,13 @@ export type PipelineEvent =
       total: number;
       speedBps: number;
     }
-  | { type: "runtimeDone" };
+  | { type: "runtimeDone" }
+  | {
+      /** 分阶段进度（如插件管理）：title 为当前阶段文字，percent 为里程碑百分比（0-100）。 */
+      type: "phase";
+      title: string;
+      percent: number;
+    };
 
 export type WebStatus = "idle" | "starting" | "ready" | "stopped" | "error";
 
@@ -148,6 +154,26 @@ export interface LogLine {
   level: string;
   text: string;
   ts: string;
+}
+
+/** 控制面板自身更新的状态字符串。 */
+export type AppUpdateStatus =
+  | "idle"
+  | "checking"
+  | "downloading"
+  | "ready"
+  | "upToDate"
+  | "failed";
+
+/** 控制面板自身更新状态（来自后端 `get_app_update_state` / 事件 `app-update-state`）。 */
+export interface AppUpdateState {
+  status: AppUpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  /** 下载进度（字节）；status==="downloading" 时有效。 */
+  downloaded: number;
+  total: number;
+  error: string | null;
 }
 
 /** 插件条目（来自 profile 清单的 dependencies）。 */

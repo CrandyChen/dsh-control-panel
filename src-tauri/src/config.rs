@@ -28,6 +28,12 @@ pub const MODE2_DIR: &str = "dsh";
 /// 便携内置运行时子目录名（Node.js + pnpm，位于程序运行目录下）。
 pub const RUNTIME_DIR: &str = "runtime";
 
+/// 控制面板自身更新的下载 / 暂存子目录名（下载包、stage、更新脚本均在此）。
+pub const UPDATE_DIR: &str = "update";
+
+/// 控制面板自身更新前的旧版本备份子目录名。
+pub const BACKUP_DIR: &str = "backup";
+
 /// 是否使用内置运行时（runtime 目录存在且有 node.exe）。
 pub fn runtime_exists() -> bool {
     let dir = exe_dir().join(RUNTIME_DIR);
@@ -37,6 +43,16 @@ pub fn runtime_exists() -> bool {
 /// 便携内置运行时目录（程序运行目录下的 runtime）。
 pub fn runtime_dir() -> PathBuf {
     exe_dir().join(RUNTIME_DIR)
+}
+
+/// 控制面板自身更新的下载 / 暂存目录（程序运行目录下的 update）。
+pub fn update_dir() -> PathBuf {
+    exe_dir().join(UPDATE_DIR)
+}
+
+/// 旧版本备份目录（程序运行目录下的 backup）。
+pub fn backup_dir() -> PathBuf {
+    exe_dir().join(BACKUP_DIR)
 }
 
 /// 源码安装（模式一）父目录：固定为程序运行目录（exe 所在目录）。

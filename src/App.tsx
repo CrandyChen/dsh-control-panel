@@ -16,6 +16,7 @@ import "dayjs/locale/en";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import ActionBar from "./components/ActionBar";
+import AppUpdateDialog from "./components/AppUpdateDialog";
 import InstallModal from "./components/InstallModal";
 import LogPanel from "./components/LogPanel";
 import PluginManagerDialog from "./components/PluginManagerDialog";
@@ -419,11 +420,19 @@ function Shell({
         }}
       />
 
+      <AppUpdateDialog
+        open={l.appUpdateDialogOpen}
+        targetVersion={l.appUpdateTargetVersion}
+        onClose={l.closeAppUpdateDialog}
+      />
+
       <SettingsDrawer
         open={settingsOpen}
         config={l.config}
+        appUpdate={l.appUpdate}
         onClose={() => setSettingsOpen(false)}
         onSave={l.saveSettings}
+        onCheckAppUpdate={l.checkAppUpdate}
       />
 
       <PluginManagerDialog

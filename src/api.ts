@@ -6,6 +6,7 @@ import type {
   BalanceResult,
   DetectResult,
   AppConfig,
+  AppUpdateState,
   LogLine,
   PipelineEvent,
   PluginList,
@@ -71,6 +72,13 @@ export const api = {
   getLogs: () => invoke<string[]>("get_logs"),
   getLogDir: () => invoke<string>("get_log_dir"),
   clearLogs: () => invoke<void>("clear_logs"),
+  // ── 控制面板自身更新 ──
+  getAppUpdateState: () => invoke<AppUpdateState>("get_app_update_state"),
+  checkAppUpdate: () => invoke<AppUpdateState>("check_app_update"),
+  /** 升级准备：解压就绪包并生成 updater.cmd，返回目标版本。完成后调用 restartToUpdate。 */
+  applyAppUpdate: (onEvent: (e: PipelineEvent) => void) =>
+    runPipeline<string>("apply_app_update", {}, onEvent),
+  restartToUpdate: () => invoke<void>("restart_to_update"),
   pluginList: (profile: string) => invoke<PluginList>("plugin_list", { profile }),
   pluginProfiles: () => invoke<string[]>("plugin_profiles"),
   pluginCheckUpdates: (profile: string) => invoke<PluginUpdates>("plugin_check_updates", { profile }),
@@ -96,4 +104,13 @@ export function onPluginUpdatesChecked(cb: (u: PluginUpdates) => void): Promise<
 
 export function onLogLine(cb: (l: LogLine) => void): Promise<() => void> {
   return listen<LogLine>("log-line", (e) => cb(e.payload));
+}
+
+export function onAppUpdateState(cb: (s: AppUpdateState) => void): Promise<() => void> {
+  return listen<AppUpdateState>("app-update-state", (e) => cb(e.payload));
+}
+
+/** 已有完整更新包（本次启动即进入升级）；payload 为目标版本号。 */
+export function onAppUpdateReady(cb: (version: string) => void): Promise<() => void> {
+  return listen<string>("app-update-ready", (e) => cb(e.payload));
 }

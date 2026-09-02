@@ -29,6 +29,7 @@ mod version;
 mod web;
 mod balance;
 mod embed;
+mod app_update;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +58,8 @@ pub struct AppState {
     pub plugin_updates: Mutex<Option<plugin::PluginUpdates>>,
     /// 内嵌 DSH 界面的原生子 Webview 句柄（复用于所有原生 Tab；见 embed.rs）。
     pub embed_webview: Mutex<Option<embed::EmbedWebview>>,
+    /// 控制面板自身更新的状态（检测/下载/就绪等；见 app_update.rs）。
+    pub app_update: Mutex<app_update::AppUpdateState>,
 }
 
 // ─────────────────────────────── 命令 ───────────────────────────────
@@ -459,7 +462,63 @@ fn clear_logs(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ─────────────────────────────── 软件自身更新 ───────────────────────────────
+
+/// 读取当前应用更新状态（供设置区展示 / 前端决定是否弹升级对话框）。
+#[tauri::command]
+fn get_app_update_state(app: AppHandle) -> app_update::AppUpdateState {
+    app.state::<AppState>().app_update.lock().unwrap().clone()
+}
+
+/// 手动触发一次检测（设置区按钮）：检测到新版则后台静默下载，完成置为 Ready。
+/// 网络失败不报错——仅更新状态里的 error 字段（静默处理）。
+#[tauri::command]
+fn check_app_update(app: AppHandle) -> app_update::AppUpdateState {
+    let handle = app.clone();
+    // 复用后台下载逻辑（线程内），立即返回当前状态；结果经 app-update-state 事件回流。
+    let _ = app_update::spawn_manual_check(&handle);
+    app.state::<AppState>().app_update.lock().unwrap().clone()
+}
+
+/// 升级准备（前端升级对话框调用）：解压就绪包并生成 updater.cmd，推送阶段进度。
+/// 完成后由前端调用 `restart_to_update`。
+#[tauri::command]
+async fn apply_app_update(
+    app: AppHandle,
+    channel: Channel<PipelineEvent>,
+) -> Result<String, String> {
+    let logger = app.state::<AppState>().logger.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (zip, ver) = app_update::has_ready_package()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| i18n::t("app_update.no_ready"))?;
+        app_update::prepare_update(&zip, &ver, &channel, &logger)?;
+        let _ = channel.send(PipelineEvent::Finished { ok: true });
+        Ok(ver)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 触发更新脚本并退出当前程序（updater.cmd 等待旧进程退出后替换并自动启动新版本）。
+#[tauri::command]
+fn restart_to_update(app: AppHandle) -> Result<(), String> {
+    app_update::restart_to_update(&app)
+}
+
 // ─────────────────────────────── 插件管理 ───────────────────────────────
+
+/// 批量插件操作：把整体进度区间 [0,100) 按条目切分，返回第 `idx` 条的
+/// 起始百分比与区间宽度（宽度为到下一段起始的差值，末段延伸到 100）。
+fn batch_progress_slice(idx: usize, total: usize) -> (u8, u8) {
+    if total == 0 {
+        return (0, 100);
+    }
+    let base = (idx as u32 * 100 / total as u32) as u8;
+    let next = ((idx + 1) as u32 * 100 / total as u32) as u8;
+    let span = next.saturating_sub(base).max(1);
+    (base, span)
+}
 
 /// 读取指定 profile 的插件列表（dependencies + 内置组合包）。
 #[tauri::command]
@@ -504,7 +563,16 @@ async fn plugin_install(
         let subject = parsed.specs.join("、");
         // 必须带 add 动词：dsh plugin --profile X add <spec...>
         let args = plugin::install_args(&parsed.specs);
-        plugin::run_plugin_op(&app, &target, &args, "plugin.op.install", &subject, &channel, &logger)
+        plugin::run_plugin_op(
+            &app,
+            &target,
+            &args,
+            "plugin.op.install",
+            &subject,
+            &channel,
+            &logger,
+            plugin::PluginOpOpts::default(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -534,7 +602,7 @@ async fn plugin_update(
         let mut messages: Vec<String> = Vec::new();
         let mut all_ok = true;
         for (idx, spec) in cleaned.iter().enumerate() {
-            // 实时进度：经 StepStarted 事件推给前端顶部展示（单个不带编号）。
+            // 实时进度：整体区间按条目分段，经 Phase 事件推给前端进度条展示。
             let title = if total == 1 {
                 i18n::t_fmt("plugin.progress.updating.one", &[spec])
             } else {
@@ -543,9 +611,10 @@ async fn plugin_update(
                     &[&(idx + 1).to_string(), &total.to_string(), spec],
                 )
             };
-            let _ = channel.send(PipelineEvent::StepStarted {
-                id: format!("item-{idx}"),
+            let (base, span) = batch_progress_slice(idx, total);
+            let _ = channel.send(PipelineEvent::Phase {
                 title,
+                percent: base,
             });
             match plugin::run_plugin_op(
                 &app,
@@ -555,6 +624,11 @@ async fn plugin_update(
                 spec,
                 &channel,
                 &logger,
+                plugin::PluginOpOpts {
+                    progress_base: base,
+                    progress_span: span,
+                    ..Default::default()
+                },
             ) {
                 Ok(r) => {
                     messages.push(r.message);
@@ -600,7 +674,7 @@ async fn plugin_remove(
         let mut messages: Vec<String> = Vec::new();
         let mut all_ok = true;
         for (idx, spec) in cleaned.iter().enumerate() {
-            // 实时进度：经 StepStarted 事件推给前端顶部展示（单个不带编号）。
+            // 实时进度：整体区间按条目分段，经 Phase 事件推给前端进度条展示。
             let title = if total == 1 {
                 i18n::t_fmt("plugin.progress.removing.one", &[spec])
             } else {
@@ -609,9 +683,10 @@ async fn plugin_remove(
                     &[&(idx + 1).to_string(), &total.to_string(), spec],
                 )
             };
-            let _ = channel.send(PipelineEvent::StepStarted {
-                id: format!("item-{idx}"),
+            let (base, span) = batch_progress_slice(idx, total);
+            let _ = channel.send(PipelineEvent::Phase {
                 title,
+                percent: base,
             });
             match plugin::run_plugin_op(
                 &app,
@@ -621,6 +696,11 @@ async fn plugin_remove(
                 spec,
                 &channel,
                 &logger,
+                plugin::PluginOpOpts {
+                    progress_base: base,
+                    progress_span: span,
+                    ..Default::default()
+                },
             ) {
                 Ok(r) => {
                     messages.push(r.message);
@@ -690,6 +770,10 @@ pub fn run() {
             get_logs,
             get_log_dir,
             clear_logs,
+            get_app_update_state,
+            check_app_update,
+            apply_app_update,
+            restart_to_update,
             plugin_list,
             plugin_profiles,
             plugin_check_updates,
@@ -729,6 +813,7 @@ pub fn run() {
                 preview_cancel: Mutex::new(None),
                 plugin_updates: Mutex::new(None),
                 embed_webview: Mutex::new(None),
+                app_update: Mutex::new(app_update::AppUpdateState::default()),
             });
             logger.info(&crate::i18n::t_fmt(
                 "log.config_loaded",
@@ -739,6 +824,9 @@ pub fn run() {
                 ],
             ));
             spawn_auto_check(app.handle().clone());
+            // 控制面板自身更新：仅 release 构建自动检测/下载与升级（dev 防误替换开发产物）。
+            #[cfg(not(debug_assertions))]
+            app_update::spawn_worker(app.handle());
             // 启动时探测全局 dsh 是否可识别 plugin 子命令；结果写入配置
             // （usePnpmDsh），不可识别时所有 dsh 命令改用 `pnpm dsh` 执行。
             let probe_handle = app.handle().clone();
@@ -871,4 +959,34 @@ fn auto_check_plugins(handle: AppHandle) {
             std::thread::sleep(std::time::Duration::from_secs(sleep_secs));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::batch_progress_slice;
+
+    #[test]
+    fn batch_progress_slice_covers_full_range_monotonically() {
+        // 单条：整段 [0,100)。
+        assert_eq!(batch_progress_slice(0, 1), (0, 100));
+        // 3 条：base 依次 0/33/66，span 分别 33/33/34，末段到 100。
+        assert_eq!(batch_progress_slice(0, 3), (0, 33));
+        assert_eq!(batch_progress_slice(1, 3), (33, 33));
+        assert_eq!(batch_progress_slice(2, 3), (66, 34));
+        // 4 条：均分 25。
+        assert_eq!(batch_progress_slice(0, 4), (0, 25));
+        assert_eq!(batch_progress_slice(3, 4), (75, 25));
+        // 单调性：后一条的 base 不小于前一条的 base+span。
+        let total = 5;
+        let mut prev_end = 0u8;
+        for i in 0..total {
+            let (base, span) = batch_progress_slice(i, total);
+            assert_eq!(base, prev_end, "item {i} should start where the previous ended");
+            assert!(span >= 1);
+            prev_end = base + span;
+        }
+        assert_eq!(prev_end, 100);
+        // 空集回退整段，不 panic。
+        assert_eq!(batch_progress_slice(0, 0), (0, 100));
+    }
 }
