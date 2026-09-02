@@ -432,7 +432,7 @@ if %errorlevel%==0 (
 )
 
 rem Back up the old executable and config.json.
-powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Add-Type -A System.IO.Compression.FileSystem; $p=@(['%APPEXE%']); if(Test-Path '%CFG%'){{$p += '%CFG%'}}; Compress-Archive -Path $p -DestinationPath '%BACKUP%' -Force"
+{bak}
 
 rem Replace the executable atomically: copy to .new, then move over the old.
 copy /y /b "%SRC%\DSH-Control-Panel.exe" "%APPEXE%.new" >nul
@@ -460,12 +460,22 @@ del /q "%~f0"
         zip_s = zip_s,
         backup_s = backup_s,
         cfg_s = cfg_s,
+        bak = backup_command(&exe_s, &cfg_s, &backup_s),
     );
 
     let cmd_path = config::update_dir().join(UPDATER_CMD);
     std::fs::write(&cmd_path, body).map_err(|e| e.to_string())?;
     let _ = target_version; // 预留：可写进脚本/文件名用于调试。
     Ok(cmd_path)
+}
+
+/// 生成备份旧版（exe + config.json）的 PowerShell 命令行。
+/// 注意：`$p=@('path')`（数组单元素）——`@(['path'])` 会被 PowerShell 当作
+/// 类型字面量（`[` 后缺类型名）而报错，导致备份静默失败。
+fn backup_command(exe: &str, cfg: &str, backup: &str) -> String {
+    format!(
+        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$p=@('{exe}'); if(Test-Path '{cfg}'){{$p += '{cfg}'}}; Compress-Archive -Path $p -DestinationPath '{backup}' -Force""#
+    )
 }
 
 /// 启动更新脚本（无黑框）并退出当前程序，由脚本完成后自动重启。
@@ -728,5 +738,21 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(locate_app_root(&empty), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_command_uses_correct_array_syntax() {
+        let s = backup_command(
+            "C:\\app\\DSH-Control-Panel.exe",
+            "C:\\app\\config.json",
+            "C:\\app\\backup\\DSH-Control-Panel-2.4.0-20260101.zip",
+        );
+        // 回归护栏：`@(['...'])` 会被 PowerShell 当作类型字面量（`[` 后缺类型名）而报错，
+        // 导致备份静默失败；必须用 `$p=@('<path>')`。
+        assert!(s.contains("$p=@('C:\\app\\DSH-Control-Panel.exe')"));
+        assert!(!s.contains("@(["));
+        assert!(s.contains("$p += 'C:\\app\\config.json'"));
+        assert!(s.contains("Compress-Archive -Path $p"));
+        assert!(s.contains("-DestinationPath 'C:\\app\\backup\\DSH-Control-Panel-2.4.0-20260101.zip'"));
     }
 }
