@@ -7,7 +7,7 @@
 import { Alert, Button, Flex, Modal, Radio, Segmented, Space, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { MODE2_DIR_NAME, REPO_DIR_NAME } from "../constants";
+import { MODE2_DIR_NAME } from "../constants";
 import { useI18n } from "../i18n";
 import type { InstallMode, KernelInstall, PrebuiltRelease, ToolStatus } from "../types";
 
@@ -111,7 +111,7 @@ export default function InstallModal({
   }, [mode, selectedVersion, installedKernels]);
 
   const target = parentDir.trim()
-    ? `${parentDir.trim().replace(/[\\/]+$/, "")}\\${REPO_DIR_NAME}`
+    ? `${parentDir.trim().replace(/[\\/]+$/, "")}\\${t("install.sourceDirName")}`
     : null;
 
   const confirm = async () => {
@@ -223,7 +223,7 @@ export default function InstallModal({
                   <br />
                   <code>{t("install.info.deps")}</code>
                   <br />
-                  {t("install.info.autoDir", { 0: REPO_DIR_NAME })}
+                  {t("install.info.autoDir", { 0: t("install.sourceDirName") })}
                   <br />
                   {t("install.info.requiresGit")}
                 </div>
@@ -263,7 +263,7 @@ export default function InstallModal({
               </Typography.Text>
             )}
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {t("install.hint", { 0: REPO_DIR_NAME })}
+              {t("install.hint", { 0: t("install.sourceDirName") })}
             </Typography.Text>
           </>
         )}

@@ -109,6 +109,14 @@ const zh: Dict = {
   "update.steps.prebuilt":
     "更新将依次执行：下载最新预构建内核 → 解压替换到安装目录；更新期间请勿关闭本窗口。",
   "update.count": "{0} 个",
+  "update.keepCurrent.label": "升级后保留当前版本（不删除勾选的旧版本）",
+  "update.selectHint":
+    "勾选要更新的内核（可跨安装方式多选）；同一安装方式勾选多个版本时仅安装该方式的最新版本。",
+  "update.col.mode": "安装方式",
+  "update.col.current": "当前内核版本",
+  "update.col.latest": "新内核版本",
+  "update.upToDate": "已是最新",
+  "update.checkFailed": "检测失败",
   // ── 状态卡片 ──
   "status.title": "状态总览",
   "status.installed": "安装状态",
@@ -163,8 +171,9 @@ const zh: Dict = {
   "install.blocked.missing": "未安装",
   "install.blocked.desc": "请先按安装指引完成安装后，再回来继续安装 DeepSeek Harness。",
   "install.target": "最终安装目录：{0}",
+  "install.sourceDirName": "dsh-src-<版本号>",
   "install.hint":
-    "提示：源码安装仅提供最新版本；若 deepseek-harness 子目录已是有效的 DeepSeek Harness 安装，可对该版本执行「修复安装」。",
+    "提示：源码安装仅提供最新版本；若 {0} 子目录已是有效的 DeepSeek Harness 源码安装，可对其执行「修复安装」。",
   "install.cancel": "取消",
   "install.guide": "查看安装指引",
   "install.start": "安装",
@@ -443,6 +452,14 @@ const en: Dict = {
   "update.steps.prebuilt":
     "The update runs: download the latest prebuilt kernel → extract and replace the install directory; do not close this window during the update.",
   "update.count": "{0}",
+  "update.keepCurrent.label": "Keep current version after update (do not delete selected old versions)",
+  "update.selectHint":
+    "Select the kernel(s) to update (you can select across install modes). Selecting multiple versions of the same mode installs only that mode's latest version.",
+  "update.col.mode": "Install mode",
+  "update.col.current": "Current version",
+  "update.col.latest": "New version",
+  "update.upToDate": "Up to date",
+  "update.checkFailed": "Check failed",
   // ── Status card ──
   "status.title": "Overview",
   "status.installed": "Install status",
@@ -497,8 +514,9 @@ const en: Dict = {
   "install.blocked.missing": "Not installed",
   "install.blocked.desc": "Follow the install guide to set up the environment first, then come back to install DeepSeek Harness.",
   "install.target": "Final install directory: {0}",
+  "install.sourceDirName": "dsh-src-<version>",
   "install.hint":
-    "Tip: source install only provides the latest version; if the deepseek-harness subdirectory is already a valid installation, you can \"Repair install\" that version.",
+    "Tip: source install only provides the latest version; if a {0} subdirectory is already a valid DeepSeek Harness source install, you can \"Repair install\" that version.",
   "install.cancel": "Cancel",
   "install.guide": "Install guide",
   "install.start": "Install",

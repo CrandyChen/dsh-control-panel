@@ -331,6 +331,20 @@ pub fn latest_subject(dir: &Path, remote_ref: &str) -> Result<String, AppError> 
     Ok(commit.summary().unwrap_or("").to_string())
 }
 
+/// 读取指定 rev（如 `origin/main`）处某个 blob 的文本内容（`git show <rev>:<path>`）。
+pub fn show_file(dir: &Path, rev: &str, path: &str) -> Result<String, AppError> {
+    let repo = open_repo(dir)?;
+    let obj = repo.revparse_single(rev).map_err(gerr)?;
+    let tree = obj.peel_to_tree().map_err(gerr)?;
+    let entry = tree
+        .get_path(Path::new(path))
+        .map_err(gerr)?;
+    let blob = repo.find_blob(entry.id()).map_err(gerr)?;
+    String::from_utf8(blob.content().to_vec()).map_err(|e| {
+        AppError::Git(format!("文件 {path} 不是有效的 UTF-8 文本：{e}"))
+    })
+}
+
 /// `git reset --hard <target>`：将工作区与索引硬重置到目标。
 pub fn reset_hard(dir: &Path, target: &str) -> Result<(), AppError> {
     let repo = open_repo(dir)?;

@@ -103,7 +103,8 @@ export interface Panel {
   install: (mode: string, version?: string | null) => Promise<void>;
   /** 检测新版本：返回结果（失败为 null），由调用方决定是否展示更新详情对话框。 */
   checkForUpdates: () => Promise<UpdateCheckResult | null>;
-  update: () => Promise<void>;
+  /** 更新选中的内核（可跨安装方式多选）；keepCurrent = 升级后是否保留当前版本。 */
+  update: (selected: string[], keepCurrent: boolean) => Promise<void>;
   /** 修复安装：清理异常状态并分级重建（详见后端 repair.rs）。 */
   repair: (kernelId?: string | null) => Promise<void>;
   /** 卸载预览是否正在统计目录大小/文件数（生成清单）。 */
@@ -494,7 +495,12 @@ export function usePanel(): Panel {
   }, [message, modal, refresh, t]);
 
   const update = useCallback(
-    () => withPhase("updating", () => api.update(onPipelineEvent), t("msg.updateDone")),
+    (selected: string[], keepCurrent: boolean) =>
+      withPhase(
+        "updating",
+        () => api.update(selected, keepCurrent, onPipelineEvent),
+        t("msg.updateDone"),
+      ),
     [onPipelineEvent, withPhase, t],
   );
 

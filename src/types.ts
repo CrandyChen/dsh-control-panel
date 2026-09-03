@@ -88,6 +88,20 @@ export interface UpdateCheckResult {
   behind: number;
   subject: string;
   checkedAt: string;
+  /** 每个已安装内核的更新行（安装方式 / 当前版本 / 新版本），供更新对话框展示与多选。 */
+  kernels: UpdateKernelInfo[];
+}
+
+/** 单个已安装内核的更新信息（更新对话框的一行）。 */
+export interface UpdateKernelInfo {
+  /** 内核 id（注册表内），作为勾选项标识。 */
+  id: string;
+  mode: InstallMode;
+  currentVersion: string;
+  /** 该方式的最新版本（查询失败/不存在时为空串）。 */
+  latestVersion: string;
+  /** 是否有更新。 */
+  updateAvailable: boolean;
 }
 
 export interface UninstallEntry {

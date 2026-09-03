@@ -199,10 +199,11 @@ impl Default for KernelInstall {
 
 // ─────────────────────────────── 内核注册表 ───────────────────────────────
 
-/// 内核唯一标识：源码固定为 "source"（仅一份原地更新），预构建为 `prebuilt-<version>`。
+/// 内核唯一标识：预构建为 `prebuilt-<version>`；源码为 `source-<version>`（版本化，
+/// 支持多版本源码内核并存，旧版曾固定为 `"source"`，见 `migrate_source_ids`）。
 pub fn kernel_id(mode: &str, version: &str) -> String {
     if mode == "source" {
-        "source".to_string()
+        format!("source-{version}")
     } else {
         format!("prebuilt-{version}")
     }
@@ -233,15 +234,27 @@ pub fn prebuilt_version_dir(version: &str) -> PathBuf {
     exe_dir().join(format!("dsh-{}", sanitize_dir_component(version)))
 }
 
-/// 源码安装目录：`<exe_dir>\<repo 目录名>`（与旧版一致，仅一份）。
-pub fn source_install_dir() -> PathBuf {
+/// 源码安装目录：`<exe_dir>\<repo 目录名>`（旧版单目录，向后兼容识别，
+/// 见 `scan_local_installs`；新版源码安装使用 `source_install_dir(version)`）。
+#[allow(dead_code)]
+pub fn source_install_dir_legacy() -> PathBuf {
     exe_dir().join(repo_dir_name())
+}
+
+/// 新版源码安装目录：`<exe_dir>\dsh-src-<净化版本>`（各版本独立，可多版本并存）。
+pub fn source_install_dir(version: &str) -> PathBuf {
+    exe_dir().join(format!("dsh-src-{}", sanitize_dir_component(version)))
+}
+
+/// 源码克隆暂存目录（clone 到此处后按读取到的实际版本 rename 到最终目录）。
+pub fn source_staging_dir() -> PathBuf {
+    exe_dir().join("dsh-src-work")
 }
 
 /// 依据安装方式与版本返回内核安装目录。
 pub fn kernel_install_dir(mode: &str, version: &str) -> PathBuf {
     if mode == "source" {
-        source_install_dir()
+        source_install_dir(version)
     } else {
         prebuilt_version_dir(version)
     }
@@ -275,6 +288,14 @@ pub fn latest_prebuilt_kernel(cfg: &AppConfig) -> Option<KernelInstall> {
         .filter(|k| k.mode == "prebuilt")
         .collect();
     pre.into_iter()
+        .max_by(|a, b| compare_versions(&a.version, &b.version))
+        .cloned()
+}
+
+/// 全部已安装内核中语义版本最高者（用于更新完成后设定活动内核）。
+pub fn latest_kernel(cfg: &AppConfig) -> Option<KernelInstall> {
+    cfg.installed_kernels
+        .iter()
         .max_by(|a, b| compare_versions(&a.version, &b.version))
         .cloned()
 }
@@ -400,6 +421,39 @@ pub fn migrate_kernel_registry(cfg: &mut AppConfig) {
                 set_active_kernel(cfg, &active.id);
             }
         }
+    }
+    // 旧版源码 id 迁移（曾固定为 "source"）：改写为版本化 `source-<version>`，
+    // 同步「上次启动」记录，避免切换/启动内核时找不到 id。
+    migrate_source_ids(cfg);
+}
+
+/// 把旧版固定 id `"source"` 的源码内核改写为版本化 `source-<version>`。
+/// 同时把「上次启动」记录从 `"source"` 改写为对应版本 id；幂等，仅在发生变更时生效。
+fn migrate_source_ids(cfg: &mut AppConfig) {
+    // 先快照现有 id，避免在可变迭代中读取注册表造成借用冲突。
+    let existing: Vec<String> = cfg.installed_kernels.iter().map(|k| k.id.clone()).collect();
+    let mut target_version: Option<String> = None;
+    for k in cfg.installed_kernels.iter_mut() {
+        if k.mode == "source" && k.id == "source" {
+            let new_id = format!("source-{}", k.version);
+            // 避免与快照中已存在的同 id 记录冲突（保留既有的那条）。
+            if existing.iter().any(|o| o == &new_id) {
+                continue;
+            }
+            k.id = new_id;
+            target_version = Some(k.version.clone());
+        }
+    }
+    if cfg.last_started_kernel_id.as_deref() == Some("source") {
+        let ver = target_version.unwrap_or_else(|| {
+            cfg.installed_kernels
+                .iter()
+                .filter(|k| k.mode == "source")
+                .max_by(|a, b| compare_versions(&a.version, &b.version))
+                .map(|k| k.version.clone())
+                .unwrap_or_else(|| "unknown".to_string())
+        });
+        cfg.last_started_kernel_id = Some(format!("source-{ver}"));
     }
 }
 
@@ -598,13 +652,13 @@ mod tests {
     }
 
     #[test]
-    fn kernel_id_is_version_scoped_for_prebuilt_and_stable_for_source() {
+    fn kernel_id_is_version_scoped_for_both_modes() {
         assert_eq!(kernel_id("prebuilt", "0.1.2-alpha.2"), "prebuilt-0.1.2-alpha.2");
-        assert_eq!(kernel_id("source", "0.1.1-rc.2"), "source");
+        assert_eq!(kernel_id("source", "0.1.1-rc.2"), "source-0.1.1-rc.2");
     }
 
     #[test]
-    fn prebuilt_version_dir_is_version_scoped() {
+    fn versioned_dirs_are_version_scoped() {
         let d = prebuilt_version_dir("0.1.2-alpha.2");
         let name = d.file_name().unwrap().to_string_lossy().to_string();
         assert_eq!(name, "dsh-0.1.2-alpha.2");
@@ -612,9 +666,13 @@ mod tests {
         let dd = prebuilt_version_dir("ab/c");
         let n2 = dd.file_name().unwrap().to_string_lossy().to_string();
         assert_eq!(n2, "dsh-ab-c");
-        // 源码目录固定为仓库名。
-        let s = kernel_install_dir("source", "x");
-        assert!(s.to_string_lossy().ends_with(repo_dir_name().as_str()));
+        // 源码目录版本化：dsh-src-<版本>。
+        let s = kernel_install_dir("source", "0.1.1-rc.2");
+        let ns = s.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(ns, "dsh-src-0.1.1-rc.2");
+        // 非法版本被净化。
+        let s2 = kernel_install_dir("source", "a/b");
+        assert!(s2.to_string_lossy().ends_with("dsh-src-a-b"));
     }
 
     #[test]
@@ -639,12 +697,12 @@ mod tests {
     fn set_active_kernel_syncs_mirror_fields() {
         let mut cfg = AppConfig::default();
         cfg.installed_kernels.push(sample_kernel("prebuilt-a", "prebuilt", "2.0.0", "D:\\dsh\\dsh-2.0.0"));
-        cfg.installed_kernels.push(sample_kernel("source", "source", "1.0.0", "D:\\deepseek-harness"));
-        set_active_kernel(&mut cfg, "source");
+        cfg.installed_kernels.push(sample_kernel("source-1.0.0", "source", "1.0.0", "D:\\dsh-src-1.0.0"));
+        set_active_kernel(&mut cfg, "source-1.0.0");
         assert_eq!(cfg.install_mode, "source");
-        assert_eq!(cfg.install_dir.as_deref(), Some("D:\\deepseek-harness"));
+        assert_eq!(cfg.install_dir.as_deref(), Some("D:\\dsh-src-1.0.0"));
         assert_eq!(cfg.installed_version.as_deref(), Some("1.0.0"));
-        assert_eq!(cfg.last_started_kernel_id.as_deref(), Some("source"));
+        assert_eq!(cfg.last_started_kernel_id.as_deref(), Some("source-1.0.0"));
     }
 
     #[test]
@@ -655,7 +713,7 @@ mod tests {
         assert!(is_kernel_installed(&cfg, "prebuilt", "0.1.2-alpha.2"));
         assert!(!is_kernel_installed(&cfg, "prebuilt", "0.1.1"));
         // 源码：只要有一条 source 即视为已装。
-        cfg.installed_kernels.push(sample_kernel("source", "source", "0.1.1-rc.2", "D:\\repo"));
+        cfg.installed_kernels.push(sample_kernel("source-0.1.1-rc.2", "source", "0.1.1-rc.2", "D:\\repo"));
         assert!(is_kernel_installed(&cfg, "source", "0.1.1-rc.2"));
     }
 
@@ -686,5 +744,35 @@ mod tests {
         assert_eq!(cfg.installed_kernels[0].id, "prebuilt-0.1.2-alpha.2");
         assert_eq!(cfg.installed_kernels[0].install_dir, "D:\\dsh");
         assert_eq!(cfg.last_started_kernel_id.as_deref(), Some("prebuilt-0.1.2-alpha.2"));
+    }
+
+    #[test]
+    fn migrate_rewrites_legacy_source_id() {
+        // 旧版源码 id 固定为 "source"：迁移后改写为 source-<版本>，并同步上次启动记录。
+        let mut cfg = AppConfig {
+            install_dir: Some("D:\\deepseek-harness".into()),
+            install_mode: "source".into(),
+            installed_version: Some("0.1.1-rc.2".into()),
+            last_started_kernel_id: Some("source".into()),
+            ..Default::default()
+        };
+        cfg.installed_kernels.push(sample_kernel("source", "source", "0.1.1-rc.2", "D:\\deepseek-harness"));
+        migrate_kernel_registry(&mut cfg);
+        assert_eq!(cfg.installed_kernels[0].id, "source-0.1.1-rc.2");
+        assert_eq!(cfg.last_started_kernel_id.as_deref(), Some("source-0.1.1-rc.2"));
+    }
+
+    #[test]
+    fn latest_kernel_picks_highest_version_across_modes() {
+        let mut cfg = AppConfig::default();
+        cfg.installed_kernels
+            .push(sample_kernel("prebuilt-0.1.0", "prebuilt", "0.1.0", "D:\\a"));
+        cfg.installed_kernels
+            .push(sample_kernel("source-0.1.11", "source", "0.1.11", "D:\\b"));
+        cfg.installed_kernels
+            .push(sample_kernel("source-0.1.2", "source", "0.1.2", "D:\\c"));
+        let latest = latest_kernel(&cfg).unwrap();
+        assert_eq!(latest.version, "0.1.11");
+        assert_eq!(latest.id, "source-0.1.11");
     }
 }

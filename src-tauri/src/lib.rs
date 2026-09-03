@@ -31,7 +31,6 @@ mod balance;
 mod embed;
 mod app_update;
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -172,27 +171,8 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> 
     tauri::async_runtime::spawn_blocking(move || {
         let logger = app.state::<AppState>().logger.clone();
         let cfg = config::load_config(&app);
-        let mode = cfg.install_mode.clone();
-        let dir = cfg
-            .install_dir
-            .clone()
-            .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
-        let path = PathBuf::from(&dir);
-        if mode == "source" && !detect::is_valid_repo(&path) {
-            return Err(error::AppError::NotInstalled.friendly());
-        }
-        if mode != "source" && !detect::is_valid_prebuilt(&path) {
-            return Err(error::AppError::NotInstalled.friendly());
-        }
-        // 预构建模式以磁盘实时版本为准：配置中可能残留旧值（如打包外壳版本
-        // 0.1.1-rc.1），与 release tag 不一致会造成「永远有新版本」。
-        let current_version = if mode == "source" {
-            cfg.installed_version.clone()
-        } else {
-            detect::read_pkg_version(&path).or_else(|| cfg.installed_version.clone())
-        };
-        let result = version::check_for_updates_in_dir(&path, &mode, current_version.as_deref())
-            .map_err(|e| e.friendly())?;
+        // 逐内核检测更新（预构建 / 源码），未安装（无任何内核）时视为无更新。
+        let result = version::detect_kernel_updates(&cfg).map_err(|e| e.friendly())?;
         logger.info(&crate::i18n::t_fmt(
             "log.update_check",
             &[
@@ -217,11 +197,18 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> 
 }
 
 #[tauri::command]
-async fn update(app: AppHandle, channel: Channel<PipelineEvent>) -> Result<(), String> {
+async fn update(
+    app: AppHandle,
+    selected: Vec<String>,
+    keep_current: bool,
+    channel: Channel<PipelineEvent>,
+) -> Result<(), String> {
     let logger = app.state::<AppState>().logger.clone();
-    tauri::async_runtime::spawn_blocking(move || update::update(&app, &channel, &logger))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        update::update(&app, selected, keep_current, &channel, &logger)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 生成卸载预览清单（安装目录 + DSH 用户数据目录）。统计通过 channel 实时
@@ -866,36 +853,16 @@ fn auto_check_dsh(handle: AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(4));
         loop {
             let cfg = config::load_config(&handle);
-            if cfg.auto_check_enabled {
-                if let Some(dir) = cfg.install_dir.clone() {
-                    let mode = cfg.install_mode.clone();
-                    let installed = if mode == "source" {
-                        detect::is_valid_repo(std::path::Path::new(&dir))
-                    } else {
-                        detect::is_valid_prebuilt(std::path::Path::new(&dir))
-                    };
-                    if installed {
-                        // 预构建模式以磁盘实时版本为准（配置可能残留旧值造成误报更新）。
-                        let current_version = if mode == "source" {
-                            cfg.installed_version.clone()
-                        } else {
-                            detect::read_pkg_version(std::path::Path::new(&dir))
-                                .or_else(|| cfg.installed_version.clone())
-                        };
-                        if let Ok(result) = version::check_for_updates_in_dir(
-                            std::path::Path::new(&dir),
-                            &mode,
-                            current_version.as_deref(),
-                        ) {
-                            let mut cfg2 = config::load_config(&handle);
-                            cfg2.update_available = result.update_available;
-                            cfg2.latest_commit = Some(result.remote_commit.clone());
-                            cfg2.latest_subject = Some(result.subject.clone());
-                            cfg2.last_check_at = Some(result.checked_at.clone());
-                            let _ = config::save_config(&handle, &cfg2);
-                            let _ = handle.emit("update-checked", &result);
-                        }
-                    }
+            if cfg.auto_check_enabled && !cfg.installed_kernels.is_empty() {
+                // 逐内核检测更新（预构建 / 源码），结果写入配置并发出事件。
+                if let Ok(result) = version::detect_kernel_updates(&cfg) {
+                    let mut cfg2 = config::load_config(&handle);
+                    cfg2.update_available = result.update_available;
+                    cfg2.latest_commit = Some(result.remote_commit.clone());
+                    cfg2.latest_subject = Some(result.subject.clone());
+                    cfg2.last_check_at = Some(result.checked_at.clone());
+                    let _ = config::save_config(&handle, &cfg2);
+                    let _ = handle.emit("update-checked", &result);
                 }
             }
             let hours = config::load_config(&handle).auto_check_interval_hours.max(1);

@@ -32,9 +32,21 @@ pub fn install(
     }
 }
 
-/// 源码安装：克隆官方仓库（gitops/libgit2）→ pnpm install → pnpm run build。
+/// 源码安装：克隆官方仓库到版本化目录 → pnpm install → pnpm run build。
 /// 运行环境（node/pnpm）在克隆仓库的同时并行下载。父目录固定为程序运行目录。
 fn install_from_source(
+    app: &AppHandle,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    install_source_latest(app, channel, logger)
+}
+
+/// 安装「最新版」源码内核到版本化目录 `<exe_dir>\dsh-src-<版本>`。
+///
+/// 版本号在克隆完成后读取（clone 到暂存目录），再据此重命名到最终目录；供
+/// 初次源码安装与「源码更新」共用。完成后注册 `source-<version>` 内核并设为活动内核。
+pub fn install_source_latest(
     app: &AppHandle,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
@@ -43,16 +55,6 @@ fn install_from_source(
     crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
 
     let parent = config::mode1_default_parent();
-    let target = config::source_install_dir();
-    let target_str = target.to_string_lossy().to_string();
-
-    if target.exists() && !target.is_dir() {
-        return Err(AppError::InvalidPath(target_str.clone()).friendly());
-    }
-    if is_valid_repo(&target) {
-        return Err(AppError::AlreadyInstalled(target_str).friendly());
-    }
-    // 父目录不存在时先创建（git clone 会创建目标子目录，但父目录需先存在）。
     if !parent.exists() {
         std::fs::create_dir_all(&parent).map_err(|e| AppError::Io(e.to_string()).friendly())?;
     }
@@ -62,14 +64,17 @@ fn install_from_source(
     let lg2 = logger.clone();
     let runtime_task = std::thread::spawn(move || crate::runtime::ensure_runtime(&ch2, &lg2));
 
-    // clone 步骤（gitops/libgit2，带进度）。
+    // 清理上次残留暂存目录，克隆到暂存目录后再按版本重命名。
+    let staging = config::source_staging_dir();
+    let _ = std::fs::remove_dir_all(&staging);
+
     let _ = channel.send(PipelineEvent::StepStarted {
         id: "clone".into(),
         title: crate::i18n::t("step.clone"),
     });
     let clone_result = crate::gitops::clone_with_progress(
         &crate::config::repo_url(),
-        &target,
+        &staging,
         channel,
         "clone",
     )
@@ -78,7 +83,29 @@ fn install_from_source(
         id: "clone".into(),
         exit_code: clone_result.as_ref().map(|_| 0).unwrap_or(-1),
     });
-    clone_result?;
+    if let Err(msg) = clone_result {
+        // 克隆失败：等待运行环境线程结束，避免残留进度事件。
+        let _ = runtime_task.join();
+        return Err(msg);
+    }
+
+    // 读取克隆得到的版本（apps/cli/package.json），据此确定最终目录名。
+    let version =
+        read_version(&staging).unwrap_or_else(|| "unknown".to_string());
+    let target = config::source_install_dir(&version);
+    let target_str = target.to_string_lossy().to_string();
+
+    if is_valid_repo(&target) {
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = runtime_task.join();
+        return Err(AppError::AlreadyInstalled(target_str).friendly());
+    }
+    // 目标目录存在但非法（非仓库残留）→ 清理后替换。
+    if target.exists() {
+        let _ = std::fs::remove_dir_all(&target);
+    }
+    std::fs::rename(&staging, &target)
+        .map_err(|e| AppError::Io(format!("无法将克隆目录重命名为 {target_str}: {e}")).friendly())?;
 
     // 等待运行环境下载完成（与克隆并行）。
     match runtime_task.join() {
@@ -272,11 +299,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_install_target_is_exe_dir_plus_repo_dir() {
-        // 源码安装目标 = 程序运行目录（exe 所在目录）+ 仓库目录名（默认 deepseek-harness）。
-        let target = config::mode1_default_parent().join(config::repo_dir_name());
+    fn source_install_target_is_versioned_dir() {
+        // 新版源码安装目标 = 程序运行目录 + dsh-src-<版本>（版本化，可多版本并存）。
+        let target = config::source_install_dir("0.1.2-alpha.2");
         assert!(target.is_absolute());
-        assert!(target.to_string_lossy().ends_with(&config::repo_dir_name().as_str()));
+        assert!(target.to_string_lossy().ends_with("dsh-src-0.1.2-alpha.2"));
+        // 暂存目录固定为 dsh-src-work。
+        assert!(config::source_staging_dir().to_string_lossy().ends_with("dsh-src-work"));
+        // 旧版单目录仍可识别（向后兼容）。
+        assert!(config::source_install_dir_legacy()
+            .to_string_lossy()
+            .ends_with(&config::repo_dir_name().as_str()));
     }
 
     #[test]

@@ -43,7 +43,9 @@ export const api = {
     runPipeline("install", { mode, version }, onEvent),
   listPrebuiltReleases: () => invoke<PrebuiltRelease[]>("list_prebuilt_releases"),
   checkForUpdates: () => invoke<UpdateCheckResult>("check_for_updates"),
-  update: (onEvent: (e: PipelineEvent) => void) => runPipeline("update", {}, onEvent),
+  /** 更新选中的内核（可跨安装方式多选）；keepCurrent = 升级后是否保留当前版本。 */
+  update: (selected: string[], keepCurrent: boolean, onEvent: (e: PipelineEvent) => void) =>
+    runPipeline("update", { selected, keepCurrent }, onEvent),
   repairInstall: (kernelId: string | null, onEvent: (e: PipelineEvent) => void) =>
     runPipeline("repair_install", { kernelId }, onEvent),
   uninstallPreview: (onEvent: (e: PipelineEvent) => void) =>

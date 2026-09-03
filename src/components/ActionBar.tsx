@@ -34,7 +34,8 @@ interface Props {
   onStart: () => void;
   onOpenUi: () => void;
   onStop: () => void;
-  onUpdate: () => void;
+  /** 更新：选中内核 id 列表 + 是否保留当前版本。 */
+  onUpdate: (selectedIds: string[], keepCurrent: boolean) => void;
   /** 检测新版本：返回结果（失败为 null）；有新版时由本组件弹详情对话框。 */
   onCheck: () => Promise<UpdateCheckResult | null>;
   onTerminal: () => void;
@@ -71,7 +72,6 @@ export default function ActionBar({
   const running = ready || starting;
   const busy = phase !== "idle";
   const updateAvailable = config?.updateAvailable ?? false;
-  const installMode = config?.installMode ?? "prebuilt";
   const pluginUpdateAvailable = (pluginUpdates?.entries ?? []).some((e) => e.updateAvailable);
 
   /** 合并后的「更新」：先检测 → 有新版本弹详情对话框 → 用户选择执行或忽略。 */
@@ -79,7 +79,9 @@ export default function ActionBar({
     if (busy) return;
     const r = await onCheck();
     if (!r) return;
-    if (!r.updateAvailable) {
+    // 任一内核有更新即视为有新版本。
+    const anyUpdate = r.updateAvailable || (r.kernels?.some((k) => k.updateAvailable) ?? false);
+    if (!anyUpdate) {
       message.success(t("action.upToDate"));
       return;
     }
@@ -230,14 +232,12 @@ export default function ActionBar({
       {updateResult && (
         <UpdateDialog
           result={updateResult}
-          currentVersion={detect?.version ?? config?.installedVersion ?? null}
           webRunning={running}
-          installMode={installMode}
           updating={phase === "updating"}
           onIgnore={() => setUpdateResult(null)}
-          onUpdate={() => {
+          onUpdate={(sel, keep) => {
             setUpdateResult(null);
-            onUpdate();
+            onUpdate(sel, keep);
           }}
         />
       )}

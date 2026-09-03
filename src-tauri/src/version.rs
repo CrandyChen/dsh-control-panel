@@ -17,6 +17,25 @@ pub struct UpdateCheckResult {
     pub behind: u64,
     pub subject: String,
     pub checked_at: String,
+    /// 每个已安装内核的更新行（安装方式 / 当前版本 / 新版本），供更新对话框展示与多选。
+    #[serde(default)]
+    pub kernels: Vec<UpdateKernelInfo>,
+}
+
+/// 单个已安装内核的更新信息（更新对话框的一行）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateKernelInfo {
+    /// 内核 id（注册表内），供前端作为勾选项标识。
+    pub id: String,
+    /// 安装方式：source / prebuilt。
+    pub mode: String,
+    /// 当前安装版本。
+    pub current_version: String,
+    /// 该方式的最新版本（查询失败时为空串）。
+    pub latest_version: String,
+    /// 是否有更新（latest 非空且与当前不同）。
+    pub update_available: bool,
 }
 
 /// 读取当前 HEAD commit（短显示需求由前端截断）。
@@ -32,6 +51,8 @@ pub fn default_branch(dir: &Path) -> Result<String, AppError> {
 /// 执行完整检测。`mode` = "prebuilt" 时走 GitHub release 比对（无需 git）；
 /// `mode` = "source" 时走 git fetch → 对比。`current_version` 用于预构建模式
 /// 比对当前安装的 tag（源码模式忽略）。
+/// 保留供测试与向后兼容使用；新的多内核检测走 `detect_kernel_updates`。
+#[allow(dead_code)]
 pub fn check_for_updates_in_dir(
     dir: &Path,
     mode: &str,
@@ -61,6 +82,7 @@ fn check_for_updates_git(dir: &Path) -> Result<UpdateCheckResult, AppError> {
         behind,
         subject,
         checked_at: crate::config::now_string(),
+        kernels: Vec::new(),
     })
 }
 
@@ -156,6 +178,92 @@ fn check_for_updates_prebuilt(current_version: Option<&str>) -> Result<UpdateChe
         behind: if update_available { 1 } else { 0 },
         subject: format!("{}（{}）", release.tag, release.url),
         checked_at: crate::config::now_string(),
+        kernels: Vec::new(),
+    })
+}
+
+/// 读取某源码仓库默认分支的 CLI 版本（`apps/cli/package.json`），作为该方法的「最新版本」。
+/// 需先 fetch 以刷新 `origin/<branch>`，再读取该 rev 处的文件内容。
+pub fn latest_source_version(dir: &Path) -> Result<String, AppError> {
+    crate::gitops::fetch(dir)?;
+    let branch = crate::gitops::default_branch(dir)?;
+    let rev = format!("origin/{branch}");
+    let content = crate::gitops::show_file(dir, &rev, "apps/cli/package.json")?;
+    parse_cli_version(&content).ok_or_else(|| {
+        AppError::Git("无法从远程源码解析 CLI 版本（apps/cli/package.json）".into())
+    })
+}
+
+/// 从 `apps/cli/package.json` 的文本中解析 version 字段。
+fn parse_cli_version(content: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(content).ok()?;
+    v.get("version")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+}
+
+/// 依据注册表批量检测每个已安装内核的更新（供「更新」按钮 / 自动检测使用）。
+///
+/// - **预构建**：查询一次最新 release 归一化版本，所有预构建行共用该值；
+/// - **源码**：在任一已装源码目录 fetch 一次，读默认分支 CLI 版本，所有源码行共用该值。
+///
+/// 单个方法查询失败时**不中断整体检测**：该方法各行的 `latest_version` 置空、
+/// `update_available` 置 false（避免某一来源网络抽筋使整次检测失败）。
+pub fn detect_kernel_updates(cfg: &crate::config::AppConfig) -> Result<UpdateCheckResult, AppError> {
+    let kernels = &cfg.installed_kernels;
+    let checked_at = crate::config::now_string();
+    let mut infos: Vec<UpdateKernelInfo> = Vec::new();
+    let mut any_update = false;
+
+    // 预构建最新版本（一次网络查询）。
+    let prebuilt_latest: Option<String> = if kernels.iter().any(|k| k.mode == "prebuilt") {
+        crate::prebuilt::latest_release()
+            .ok()
+            .map(|r| crate::version::normalized_tag_version(&r.tag))
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    // 源码最新版本（在任一已装源码目录 fetch 一次）。
+    let source_latest: Option<String> = (|| -> Option<String> {
+        let dir = kernels.iter().find(|k| k.mode == "source")?.install_dir.clone();
+        latest_source_version(std::path::Path::new(&dir)).ok()
+    })();
+
+    for k in kernels {
+        let (latest_v, update_available) = if k.mode == "source" {
+            let latest = source_latest.clone().unwrap_or_default();
+            (latest.clone(), !latest.is_empty() && latest != k.version)
+        } else {
+            let latest = prebuilt_latest.clone().unwrap_or_default();
+            (latest.clone(), !latest.is_empty() && latest != k.version)
+        };
+        if update_available {
+            any_update = true;
+        }
+        infos.push(UpdateKernelInfo {
+            id: k.id.clone(),
+            mode: k.mode.clone(),
+            current_version: k.version.clone(),
+            latest_version: latest_v,
+            update_available,
+        });
+    }
+
+    let subject = if any_update {
+        crate::i18n::t("update.subject.update")
+    } else {
+        crate::i18n::t("update.subject.latest")
+    };
+    Ok(UpdateCheckResult {
+        update_available: any_update,
+        local_commit: String::new(),
+        remote_commit: String::new(),
+        behind: 0,
+        subject,
+        checked_at,
+        kernels: infos,
     })
 }
 
@@ -199,5 +307,16 @@ mod tests {
         assert_eq!(normalized_tag_version("misc-0.1.0-rc.1"), "0.1.0-rc.1");
         // 纯数字起始的版本不受影响。
         assert_eq!(normalized_tag_version("0.1.2-alpha.2"), "0.1.2-alpha.2");
+    }
+
+    #[test]
+    fn parse_cli_version_extracts_version() {
+        assert_eq!(
+            parse_cli_version(r#"{"name":"@deepseek-ai/dsh","version":"0.1.2-alpha.2"}"#).as_deref(),
+            Some("0.1.2-alpha.2")
+        );
+        // 无效 JSON / 缺 version 字段 → None。
+        assert_eq!(parse_cli_version("not json"), None);
+        assert_eq!(parse_cli_version(r#"{"name":"x"}"#), None);
     }
 }

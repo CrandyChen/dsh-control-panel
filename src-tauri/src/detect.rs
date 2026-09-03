@@ -138,22 +138,42 @@ pub fn detect_state(dir: Option<&str>, mode: &str) -> DetectResult {
 }
 
 /// 扫描程序运行目录（exe 所在目录）下所有已安装的 DSH 内核：
-/// - 预构建：`dsh-<版本>` 各版本独立目录（以及旧版单一 `dsh` 目录）；
-/// - 源码：`<repo 目录名>`（默认 `deepseek-harness`）目录。
+/// - 源码（新版）：`dsh-src-<版本>` 各版本独立目录；
+/// - 源码（旧版）：`<repo 目录名>`（默认 `deepseek-harness`）目录；
+/// - 预构建：`dsh-<版本>` 各版本独立目录（以及旧版单一 `dsh` 目录）。
 pub fn scan_local_installs() -> Vec<crate::config::KernelInstall> {
     let exe = crate::config::exe_dir();
     let mut out: Vec<crate::config::KernelInstall> = Vec::new();
 
-    // 预构建（版本化 `dsh-*` + 旧版单一 `dsh`）。
     if let Ok(rd) = std::fs::read_dir(&exe) {
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            // `dsh-` 开头的目录（该前缀仅用于内核目录；dsh-embed 是内嵌 Webview 标签，非目录）。
+            let dir = entry.path();
+
+            // 源码（新版）：`dsh-src-<版本>`。跳过暂存目录（dsh-src-work）。
+            if name.starts_with("dsh-src-") && name != "dsh-src-work" {
+                if !is_valid_repo(&dir) {
+                    continue;
+                }
+                let version = read_installed_version(&dir, "source")
+                    .unwrap_or_else(|| name.trim_start_matches("dsh-src-").to_string());
+                let id = crate::config::kernel_id("source", &version);
+                out.push(crate::config::KernelInstall {
+                    id,
+                    mode: "source".to_string(),
+                    version,
+                    install_dir: dir.to_string_lossy().to_string(),
+                    commit: crate::version::read_commit(&dir),
+                    installed_at: crate::config::now_string(),
+                });
+                continue;
+            }
+
+            // 预构建：`dsh-<版本>`（及其余 dsh-* 前缀）+ 旧版单一 `dsh`。
             let is_prebuilt_dir = name.starts_with("dsh-") || name == crate::config::MODE2_DIR;
             if !is_prebuilt_dir {
                 continue;
             }
-            let dir = entry.path();
             if !is_valid_prebuilt(&dir) {
                 continue;
             }
@@ -171,7 +191,7 @@ pub fn scan_local_installs() -> Vec<crate::config::KernelInstall> {
         }
     }
 
-    // 源码安装（仅一份）。
+    // 源码（旧版单目录）。
     let repo = exe.join(crate::config::repo_dir_name());
     if is_valid_repo(&repo) {
         let version = read_installed_version(&repo, "source").unwrap_or_else(|| "unknown".to_string());

@@ -28,7 +28,7 @@ The program has built-in Git client support; Node.js and pnpm are downloaded aut
 
 ## Installing DeepSeek Harness (two modes, multiple versions)
 
-The install location is fixed to the control panel's own directory. Prebuilt kernels are extracted into a `dsh-<version>` subdirectory per version (independent, can coexist); a source install is cloned into the `deepseek-harness` subdirectory. On startup the program detects any DSH installation in this directory and automatically adopts one if already present.
+The install location is fixed to the control panel's own directory. Prebuilt kernels are extracted into a `dsh-<version>` subdirectory per version (independent, can coexist); a source install is cloned into a `dsh-src-<version>` subdirectory per version (independent, can coexist). On startup the program detects any DSH installation in this directory (including the legacy `deepseek-harness` and `dsh` directories) and automatically adopts one if already present.
 
 Click "Install" and choose an install mode:
 
@@ -43,8 +43,10 @@ Click "Install" and choose an install mode:
 - Runs in the background: DSH keeps running as an independent process; closing the panel does not affect it.
 
 ### 2. DSH Update
-- Checks for updates according to your install mode: the prebuilt kernel compares against the latest release of [deepseek-harness-pkg](https://github.com/dsh-tauri-desk/deepseek-harness-pkg); the source mode compares against the official repository commits.
-- An automatic background check shows a red **NEW** badge on the Update button when a new version is found; the web service is stopped automatically before updating. A newly updated version is installed as an independent kernel and becomes the current one; the old version is kept and can be switched to or uninstalled.
+- Checks for updates according to your install mode: the prebuilt kernel compares against the latest release of [deepseek-harness-pkg](https://github.com/dsh-tauri-desk/deepseek-harness-pkg); the source mode compares against the CLI version on the official source repository.
+- An automatic background check shows a red **NEW** badge on the Update button when a new version is found; the web service is stopped automatically before updating.
+- Clicking "Update" opens a dialog that lists every installed kernel in a simple table (install mode / current version / new version) and lets you select which kernels to update (you can select across install modes). Selecting multiple versions of the same install mode only installs that mode's latest version.
+- The dialog has a "Keep current version after update" checkbox (off by default). When unchecked, the selected old versions are removed after the latest kernel is installed; when checked, it behaves like installing the latest kernel fresh while keeping all selected current versions. The updated new kernel is installed as an independent kernel and becomes the current one; the old version(s) can be switched to or uninstalled.
 
 ### 3. DSH Repair Installation
 - Repairs a specific kernel version: cleans up abnormal state and rebuilds. The source mode runs a git reset + rebuild; the prebuilt mode re-downloads and re-extracts that version's kernel.

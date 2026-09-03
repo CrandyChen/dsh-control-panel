@@ -216,6 +216,18 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             " 提示：若本地存在未提交的改动或网络异常，请先手动处理（可在终端中执行 git pull 查看原因），再重试更新。",
             " Tip: if there are uncommitted local changes or a network issue, resolve them first (run `git pull` in a terminal to inspect), then retry the update.",
         ),
+        "update.no_selection" => (
+            "请选择要更新的内核。",
+            "Select the kernel(s) to update.",
+        ),
+        "update.subject.update" => (
+            "检测到新的 DeepSeek Harness 内核版本",
+            "A new DeepSeek Harness kernel version is available",
+        ),
+        "update.subject.latest" => (
+            "当前已是最新版本",
+            "Already up to date",
+        ),
         // ── 卸载预览扫描 ──
         "uninstall.scan.progress" => (
             "正在统计 {0}：{1} 项 / {2}",
