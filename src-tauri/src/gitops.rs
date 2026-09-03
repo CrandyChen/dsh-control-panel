@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use git2::build::RepoBuilder;
-use git2::{Direction, FetchOptions, RemoteCallbacks, Repository, ResetType, StatusOptions};
+use git2::{FetchOptions, RemoteCallbacks, Repository, ResetType, StatusOptions};
 use tauri::ipc::Channel;
 
 use crate::detect::is_valid_repo;
@@ -392,7 +392,7 @@ pub fn clean(dir: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 生成一个唯一的临时目录（用于 ls-remote 的匿名仓库句柄）。
+/// 生成一个唯一的临时目录（用于远程仓库探测 / 读取临时 git 句柄）。
 fn temp_repo_dir() -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -401,43 +401,39 @@ fn temp_repo_dir() -> PathBuf {
     std::env::temp_dir().join(format!("dsh-gitops-ls-{}-{}", std::process::id(), nanos))
 }
 
-/// `git ls-remote --tags <url>`：列出远程仓库的 tag 名（不含 `refs/tags/` 前缀）。
-/// libgit2 无开箱的 ls-remote，用匿名 remote 连接后 `Remote::list()` 读取。
-/// GitHub 常抽筋：失败自动重试多次。
-pub fn ls_remote_tags(url: &str) -> Result<Vec<String>, AppError> {
-    let mut last_err: Option<AppError> = None;
-    for attempt in 0..GIT_NET_RETRY {
-        match ls_remote_tags_once(url) {
-            Ok(t) => return Ok(t),
-            Err(e) => {
-                last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(
-                    GIT_NET_RETRY_DELAY_BASE_MS * (attempt as u64 + 1),
-                ));
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| AppError::Git("ls-remote tags 失败".into())))
-}
-
-/// 单次 ls-remote（无重试）。
-fn ls_remote_tags_once(url: &str) -> Result<Vec<String>, AppError> {
+/// 读取远程某路径文件的文本 + 对应分支 HEAD 的提交 SHA（进程内 libgit2，不依赖系统 git）。
+/// 用于「插件检查更新」读取 git 依赖 HEAD 的 `package.json` 以确定可更新到的版本/提交。
+pub fn read_remote_file_with_head(
+    url: &str,
+    path: &str,
+    branch: Option<&str>,
+) -> Result<(String, String), AppError> {
     let tmp = temp_repo_dir();
-    let repo = Repository::init(&tmp).map_err(gerr)?;
-    let result = (|| -> Result<Vec<String>, AppError> {
-        let mut remote = repo.remote_anonymous(url).map_err(gerr)?;
-        remote.connect(Direction::Fetch).map_err(gerr)?;
-        let heads = remote.list().map_err(gerr)?;
-        let mut tags = Vec::new();
-        for h in heads {
-            let name = h.name();
-            if let Some(tag) = name.strip_prefix("refs/tags/") {
-                tags.push(tag.to_string());
-            }
+    let _ = std::fs::remove_dir_all(&tmp);
+    let repo = Repository::init_bare(&tmp).map_err(gerr)?;
+    let result = (|| -> Result<(String, String), AppError> {
+        let mut fo = FetchOptions::new();
+        // 仅网络 URL 浅取一行（缩小传输）；本地路径（测试 / 本地仓库）不支持 shallow。
+        if url.starts_with("http://") || url.starts_with("https://") {
+            fo.depth(1);
         }
-        Ok(tags)
+        let mut remote = repo.remote("origin", url).map_err(gerr)?;
+        remote
+            .fetch(
+                &["+refs/heads/*:refs/remotes/origin/*"],
+                Some(&mut fo),
+                None,
+            )
+            .map_err(gerr)?;
+        let branch = match branch {
+            Some(b) if !b.trim().is_empty() => b.to_string(),
+            _ => default_branch(&tmp)?,
+        };
+        let rev = format!("origin/{branch}");
+        let text = show_file(&tmp, &rev, path)?;
+        let commit = rev_parse(&tmp, &rev)?;
+        Ok((text, commit))
     })();
-    // 及时释放句柄后清理临时目录（Windows 下先 drop 再删除）。
     drop(repo);
     let _ = std::fs::remove_dir_all(&tmp);
     result
@@ -539,5 +535,25 @@ mod tests {
         assert!(!parent.join("deepseek-harness.partial-3").exists());
         assert!(parent.join("other").exists());
         std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn read_remote_default_file_reads_version_from_local_repo() {
+        // 用进程内 libgit2（而非系统 git）从本地仓库读取 package.json 的版本。
+        let src = tmp("remotefile-src");
+        let _ = std::fs::remove_dir_all(&src);
+        let repo = Repository::init(&src).unwrap();
+        let branch = repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(String::from))
+            .unwrap_or_else(|| "master".into());
+        commit_file(&repo, "package.json", r#"{"name":"x","version":"9.9.9"}"#);
+        let (text, head_commit) =
+            read_remote_file_with_head(&src.to_string_lossy(), "package.json", Some(&branch)).unwrap();
+        assert_eq!(head_commit, crate::gitops::rev_parse(&src, "HEAD").unwrap());
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["version"].as_str(), Some("9.9.9"));
+        std::fs::remove_dir_all(&src).ok();
     }
 }

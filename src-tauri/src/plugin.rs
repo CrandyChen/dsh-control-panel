@@ -1395,27 +1395,151 @@ pub fn github_repo_from_spec(spec: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-/// 从 `git ls-remote --tags` 输出中选取最高的语义化版本 tag。
-pub fn pick_latest_tag(output: &str) -> Option<String> {
-    fn parse_ver(s: &str) -> Option<semver::Version> {
-        let t = s.trim().trim_start_matches('v');
-        semver::Version::parse(t).ok()
+/// git 依赖的 ref 类型（决定「最新版」来源）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitRefKind {
+    /// 无 ref 或分支名：随分支 HEAD 移动（更新会刷新）。
+    Movable,
+    /// 指向语义化 tag：固定在该 tag。
+    Tag,
+    /// 指向固定提交 SHA：不可更新。
+    Commit,
+}
+
+fn is_commit_sha(s: &str) -> bool {
+    let t = s.trim();
+    t.len() >= 7 && t.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// 依据 git 依赖的 ref（无则 None）判定其类型。
+fn classify_git_ref(reference: Option<&str>) -> GitRefKind {
+    let Some(r) = reference else {
+        return GitRefKind::Movable;
+    };
+    let r = r.trim();
+    if r.is_empty() {
+        return GitRefKind::Movable;
     }
-    let mut best: Option<(semver::Version, String)> = None;
-    for line in output.lines() {
-        let token = line.split_whitespace().last().unwrap_or("");
-        let tag = token.strip_prefix("refs/tags/").unwrap_or("");
-        let tag = tag.trim_end_matches("^{}");
-        if tag.is_empty() {
-            continue;
-        }
-        if let Some(v) = parse_ver(tag) {
-            if best.as_ref().map(|(bv, _)| v > *bv).unwrap_or(true) {
-                best = Some((v, tag.to_string()));
+    if is_commit_sha(r) {
+        return GitRefKind::Commit;
+    }
+    if semver::Version::parse(r.trim_start_matches('v')).is_ok() {
+        return GitRefKind::Tag;
+    }
+    GitRefKind::Movable
+}
+
+/// 从 `github:` / GitHub 链接归一化后的 spec 中抽取 `#ref`（无则 None）。
+fn git_ref_of_spec(spec: &str) -> Option<String> {
+    let s = spec.trim();
+    let after_prefix = if let Some(rest) = s.strip_prefix("github:") {
+        rest
+    } else if let Some(rest) = s
+        .strip_prefix("https://github.com/")
+        .or_else(|| s.strip_prefix("http://github.com/"))
+    {
+        rest
+    } else {
+        s
+    };
+    let (_, ref_part) = after_prefix.split_once('#')?;
+    if ref_part.is_empty() {
+        None
+    } else {
+        Some(ref_part.to_string())
+    }
+}
+
+/// 从 package.json 文本中解析 `version` 字段。
+fn version_from_package_json(text: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.get("version")
+        .and_then(|x| x.as_str())
+        .map(String::from)
+}
+
+/// 对 git 插件计算更新信息：返回 (最新版本, 是否有更新的覆盖值)。
+///
+/// 与 `dsh plugin update` 一致：
+/// - **Movable**（无 ref / 分支）：读该分支 HEAD 的 `package.json` 版本，并将**已装提交**
+///   与 HEAD 提交比较（仓库可能改了提交而版本号未变，版本比较无法感知）；
+/// - **Tag**：该 tag 的语义化版本（去 `v`），由 version_less 判定；
+/// - **Commit**：固定提交，无更新（覆盖为 false）。
+fn git_dep_update(
+    spec: &str,
+    pdir: &Path,
+    key: &str,
+    current: Option<&str>,
+) -> (Option<String>, Option<bool>) {
+    let Some(repo) = github_repo_from_spec(spec) else {
+        return (None, None);
+    };
+    let reference = git_ref_of_spec(spec);
+    match classify_git_ref(reference.as_deref()) {
+        GitRefKind::Commit => (None, Some(false)),
+        GitRefKind::Tag => (reference.map(|r| r.trim_start_matches('v').to_string()), None),
+        GitRefKind::Movable => {
+            let url = format!("https://github.com/{repo}");
+            // 分支名则读该分支 HEAD；否则读默认分支 HEAD（内置 libgit2，不依赖系统 git）。
+            let branch = reference.filter(|r| !is_commit_sha(r));
+            match crate::gitops::read_remote_file_with_head(
+                &url,
+                "package.json",
+                branch.as_deref(),
+            ) {
+                Ok((text, head_commit)) => {
+                    let latest_ver = version_from_package_json(&text);
+                    // 已装提交来自 pnpm-lock.yaml 的解析条目；能取到时按提交比较。
+                    let upd = match installed_git_commit(pdir, key) {
+                        Some(installed_commit) if !head_commit.is_empty() => {
+                            installed_commit != head_commit
+                        }
+                        // 取不到已装提交 / 无 HEAD 提交：回退版本比较。
+                        _ => match (current, latest_ver.as_deref()) {
+                            (Some(c), Some(l)) => version_less(c, l),
+                            _ => false,
+                        },
+                    };
+                    (latest_ver, Some(upd))
+                }
+                Err(_) => (None, None),
             }
         }
     }
-    best.map(|(_, t)| t)
+}
+
+/// 从 profile 的 pnpm-lock.yaml 解析某 git 插件已解析到的提交 SHA。
+/// pnpm-lock.yaml 的 packages 节中，git 依赖条目键形如 `<key>@https://…/tar.gz/<40hex>`。
+fn installed_git_commit(pdir: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(pdir.join("pnpm-lock.yaml")).ok()?;
+    text.lines()
+        .map(|l| l.trim())
+        .find_map(|l| {
+            if !l.starts_with(&format!("{key}@")) {
+                return None;
+            }
+            extract_tar_gz_sha(l)
+        })
+}
+
+/// 从字符串中 `tar.gz/` 之后提取提交 SHA（最多 40 位 hex）。
+fn extract_tar_gz_sha(s: &str) -> Option<String> {
+    let marker = "tar.gz/";
+    let idx = s.rfind(marker)? + marker.len();
+    let rest = &s[idx..];
+    let mut sha = String::new();
+    for c in rest.chars() {
+        if c.is_ascii_hexdigit() && sha.len() < 40 {
+            sha.push(c);
+        } else {
+            break;
+        }
+    }
+    if sha.len() >= 7 {
+        Some(sha)
+    } else {
+        None
+    }
 }
 
 /// semver 比较：a < b 且两者均可解析时返回 true。
@@ -1464,31 +1588,63 @@ pub fn parse_latest_semver(output: &str) -> Option<String> {
         })
 }
 
-/// 查询 GitHub 仓库的最高版本 tag，失败返回 None。
-///
-/// 优先用系统 `git ls-remote --tags` 子进程：它与「更新」路径（pnpm 拉取 git 依赖）
-/// 共用同一套 git/网络/代理配置，因此 GitHub 在「更新」可达时此处同样可达，
-/// 避免进程内 libgit2 的网络栈（不读 `.npmrc`/系统代理 env）与 pnpm 不一致导致
-/// 查询在「更新」可用时反而失败、被静默当作「无更新」。无 git 环境时回退到 libgit2。
-fn query_latest_github_tag(repo: &str, cwd: &Path) -> Option<String> {
-    let url = format!("https://github.com/{repo}");
-    // 优先：git 子进程（输出为 `<sha>\trefs/tags/<tag>`，pick_latest_tag 可直接解析）。
-    let args = vec!["ls-remote".to_string(), "--tags".to_string(), url.clone()];
-    if let Some(out) = run_query(
-        &["git.cmd", "git"],
-        &args,
-        cwd,
-        Duration::from_secs(NPM_QUERY_TIMEOUT_SECS),
-    ) {
-        if let Some(v) = pick_latest_tag(&out) {
-            return Some(v);
+/// 计算 npm 插件可更新到的最新版本（与 `dsh plugin update` 一致）：
+/// - spec 为真实 semver 范围（如 `^0.19.0` / `~0.19.0` / `*`）→ 取**满足该范围**的最高版本；
+/// - spec 为 dist-tag（如 `latest` / `next`，`VersionReq` 解析失败）→ 回退全局 latest。
+fn query_latest_npm_for_spec(pkg: &str, spec: &str, cwd: &Path) -> Option<String> {
+    match semver::VersionReq::parse(spec.trim()) {
+        Ok(req) => query_latest_npm_versions_in_range(pkg, &req, cwd),
+        Err(_) => query_latest_npm(pkg, cwd),
+    }
+}
+
+/// 查询满足 semver 范围的最大版本（`pnpm view <pkg> versions --json`）。
+fn query_latest_npm_versions_in_range(
+    pkg: &str,
+    req: &semver::VersionReq,
+    cwd: &Path,
+) -> Option<String> {
+    let args = vec![
+        "view".to_string(),
+        pkg.to_string(),
+        "versions".to_string(),
+        "--json".to_string(),
+    ];
+    for attempt in 0..NPM_QUERY_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(NPM_QUERY_BACKOFF_MS * attempt as u64));
+        }
+        if let Some(out) = run_query(
+            &["pnpm.cmd", "pnpm", "npm.cmd", "npm"],
+            &args,
+            cwd,
+            Duration::from_secs(NPM_QUERY_TIMEOUT_SECS),
+        ) {
+            if let Some(v) = pick_max_version_in_range(&out, req) {
+                return Some(v);
+            }
         }
     }
-    // 回退：进程内 libgit2。
-    if let Ok(tags) = crate::gitops::ls_remote_tags(&url) {
-        return pick_latest_tag(&tags.join("\n"));
-    }
     None
+}
+
+/// 从 `npm view <pkg> versions --json` 输出（数组或 `{"versions":[...]}`）中取
+/// 满足范围的最大版本。
+fn pick_max_version_in_range(output: &str, req: &semver::VersionReq) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_str(output).ok()?;
+    let arr = val
+        .as_array()
+        .or_else(|| val.get("versions").and_then(|v| v.as_array()))?;
+    arr.iter()
+        .filter_map(|x| x.as_str())
+        .filter_map(|s| {
+            semver::Version::parse(s.trim_start_matches('v'))
+                .ok()
+                .map(|ver| (ver, s.to_string()))
+        })
+        .filter(|(ver, _)| req.matches(ver))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, s)| s)
 }
 
 fn make_update_info(
@@ -1497,11 +1653,12 @@ fn make_update_info(
     latest: Option<String>,
     source: &str,
     error: Option<String>,
+    update_override: Option<bool>,
 ) -> PluginUpdateInfo {
-    let update_available = match (&current, &latest) {
+    let update_available = update_override.unwrap_or_else(|| match (&current, &latest) {
         (Some(c), Some(l)) => version_less(c, l),
         _ => false,
-    };
+    });
     PluginUpdateInfo {
         key,
         current_version: current,
@@ -1513,7 +1670,13 @@ fn make_update_info(
 }
 
 /// 检测指定 profile 已安装第三方插件的更新。
-/// npm 类查询 registry 最新版；github 类查询远程最高版本 tag；其余标记 unknown。
+///
+/// 每种 spec 类型都用与「更新」（`dsh plugin update`）一致的来源判定可更新范围：
+/// - npm（semver 范围）→ 取满足该范围的最高版本（`versions --json`），dist-tag 回退全局 latest；
+/// - github 无 ref / 分支 → 读该分支 HEAD 的 `package.json` 版本（内置 libgit2，不依赖系统 git）；
+/// - github 指向 tag → 该 tag 版本；指向固定提交 / 压缩包 URL → 固定，无更新；
+/// - 其它 → unknown。
+///
 /// 查询彻底失败 / 已装版本无法读取时该项 `error` 置为失败原因（不再静默当作「无更新」），
 /// 不中断整体检测。
 pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUpdates, String> {
@@ -1522,16 +1685,33 @@ pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUp
     let list = read_plugin_list(&pdir, profile, true);
     let mut entries = Vec::new();
     for e in &list.entries {
-        if is_npm_spec(&e.spec) {
-            let latest = query_latest_npm(&e.key, cwd);
+        if is_tarball_url(&e.spec) {
+            // 固定压缩包（.tar.gz / .tgz / /archive/）：不可更新，不误报。
+            entries.push(make_update_info(
+                e.key.clone(),
+                e.version.clone(),
+                None,
+                "github",
+                None,
+                Some(false),
+            ));
+        } else if is_npm_spec(&e.spec) {
+            let latest = query_latest_npm_for_spec(&e.key, &e.spec, cwd);
             let error = match (&e.version, &latest) {
                 (None, Some(_)) => Some(crate::i18n::t("plugin.updates.current_unknown")),
                 (Some(_), None) => Some(crate::i18n::t("plugin.updates.query_failed")),
                 _ => None,
             };
-            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "npm", error));
-        } else if let Some(repo) = github_repo_from_spec(&e.spec) {
-            let latest = query_latest_github_tag(&repo, cwd);
+            entries.push(make_update_info(
+                e.key.clone(),
+                e.version.clone(),
+                latest,
+                "npm",
+                error,
+                None,
+            ));
+        } else if github_repo_from_spec(&e.spec).is_some() {
+            let (latest, upd) = git_dep_update(&e.spec, &pdir, &e.key, e.version.as_deref());
             let error = match (&e.version, &latest) {
                 (None, Some(_)) => Some(crate::i18n::t("plugin.updates.current_unknown")),
                 (Some(_), None) => Some(crate::i18n::t("plugin.updates.query_failed")),
@@ -1543,9 +1723,17 @@ pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUp
                 latest,
                 "github",
                 error,
+                upd,
             ));
         } else {
-            entries.push(make_update_info(e.key.clone(), e.version.clone(), None, "unknown", None));
+            entries.push(make_update_info(
+                e.key.clone(),
+                e.version.clone(),
+                None,
+                "unknown",
+                None,
+                None,
+            ));
         }
     }
     Ok(PluginUpdates {
@@ -1859,16 +2047,6 @@ mod tests {
     }
 
     #[test]
-    fn latest_tag_picks_highest_semver() {
-        let out = "aaa\trefs/tags/v0.10.0\nbbb\trefs/tags/v0.9.1\nccc\trefs/tags/v0.10.0^{}\nddd\trefs/tags/release\n";
-        assert_eq!(pick_latest_tag(out).as_deref(), Some("v0.10.0"));
-        let out2 = "aaa\trefs/tags/1.2.3\nbbb\trefs/tags/2.0.0\n";
-        assert_eq!(pick_latest_tag(out2).as_deref(), Some("2.0.0"));
-        assert_eq!(pick_latest_tag("aaa\trefs/tags/release"), None);
-        assert_eq!(pick_latest_tag(""), None);
-    }
-
-    #[test]
     fn version_less_is_strict() {
         assert!(version_less("0.13.0", "0.13.1"));
         assert!(version_less("1.0.0", "1.2.3"));
@@ -1876,6 +2054,103 @@ mod tests {
         assert!(!version_less("1.3.0", "1.2.3"));
         assert!(!version_less("abc", "1.0.0"));
         assert!(!version_less("1.0.0", "abc"));
+    }
+
+    #[test]
+    fn classify_git_ref_categorizes_refs() {
+        use GitRefKind::*;
+        assert_eq!(classify_git_ref(None), Movable);
+        assert_eq!(classify_git_ref(Some("")), Movable);
+        assert_eq!(classify_git_ref(Some("main")), Movable);
+        assert_eq!(classify_git_ref(Some("dev")), Movable);
+        assert_eq!(classify_git_ref(Some("v0.6.3")), Tag);
+        assert_eq!(classify_git_ref(Some("1.2.3")), Tag);
+        assert_eq!(classify_git_ref(Some("ad392ceea4cdbe545d99ddd3730b4cc62036bd44")), Commit);
+        assert_eq!(classify_git_ref(Some("abc1234")), Commit);
+    }
+
+    #[test]
+    fn git_ref_of_spec_extracts_hash() {
+        assert_eq!(git_ref_of_spec("github:a/b"), None);
+        assert_eq!(git_ref_of_spec("github:a/b#v1"), Some("v1".to_string()));
+        assert_eq!(git_ref_of_spec("github:a/b#dev"), Some("dev".to_string()));
+        assert_eq!(
+            git_ref_of_spec("https://github.com/a/b#main"),
+            Some("main".to_string())
+        );
+        assert_eq!(git_ref_of_spec("http://github.com/a/b#"), None);
+    }
+
+    #[test]
+    fn version_from_package_json_parses_version() {
+        assert_eq!(
+            version_from_package_json(r#"{"name":"x","version":"1.2.3"}"#).as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(version_from_package_json(r#"{"name":"x"}"#), None);
+        assert_eq!(version_from_package_json("not json"), None);
+    }
+
+    #[test]
+    fn git_dep_update_handles_tag_and_commit() {
+        let pdir = Path::new("");
+        // Tag：取去 v 的语义化版本；无更新覆盖 → 由 version_less 判定。
+        let (latest, upd) = git_dep_update("github:omdsh-dev/dsh-better-sidebar#v0.6.3", pdir, "k", None);
+        assert_eq!(latest.as_deref(), Some("0.6.3"));
+        assert_eq!(upd, None);
+        // Commit：固定提交，无更新（覆盖为 false）。
+        let (latest, upd) = git_dep_update(
+            "github:omdsh-dev/dsh-better-sidebar#ad392ceea4cdbe545d99ddd3730b4cc62036bd44",
+            pdir,
+            "k",
+            None,
+        );
+        assert_eq!(latest, None);
+        assert_eq!(upd, Some(false));
+    }
+
+    #[test]
+    fn extract_tar_gz_sha_parses_commit() {
+        assert_eq!(
+            extract_tar_gz_sha(
+                "dsh-better-sidebar@https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/ad392ceea4cdbe545d99ddd3730b4cc62036bd44:"
+            )
+            .as_deref(),
+            Some("ad392ceea4cdbe545d99ddd3730b4cc62036bd44")
+        );
+        assert_eq!(extract_tar_gz_sha("no marker here"), None);
+    }
+
+    #[test]
+    fn installed_git_commit_parses_lockfile() {
+        let dir = tmp_dir("lockfile");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pnpm-lock.yaml"),
+            "importers:\n  .:\n    dependencies:\n      dsh-better-sidebar:\n        specifier: github:omdsh-dev/dsh-better-sidebar\n        version: https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/ad392ceea4cdbe545d99ddd3730b4cc62036bd44\npackages:\n  dsh-better-sidebar@https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/ad392ceea4cdbe545d99ddd3730b4cc62036bd44:\n    version: 0.19.0-alpha.0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            installed_git_commit(&dir, "dsh-better-sidebar").as_deref(),
+            Some("ad392ceea4cdbe545d99ddd3730b4cc62036bd44")
+        );
+        // 其它 key 不命中。
+        assert_eq!(installed_git_commit(&dir, "other-plugin"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pick_max_version_in_range_respects_semver_range() {
+        // 数组形式。
+        let arr = r#"["0.19.0","0.19.2","0.20.0","0.21.0"]"#;
+        let req = semver::VersionReq::parse("^0.19.0").unwrap();
+        assert_eq!(pick_max_version_in_range(arr, &req).as_deref(), Some("0.19.2"));
+        // object 形式（含 versions 字段）。
+        let obj = r#"{"versions":["1.0.0","1.2.0","2.0.0"]}"#;
+        let req2 = semver::VersionReq::parse("^1.0.0").unwrap();
+        assert_eq!(pick_max_version_in_range(obj, &req2).as_deref(), Some("1.2.0"));
+        // 空参数返回 None。
+        assert_eq!(pick_max_version_in_range("[]", &req), None);
     }
 
     #[test]
@@ -1901,6 +2176,7 @@ mod tests {
             None,
             "npm",
             Some("查询失败".into()),
+            None,
         );
         assert!(!failed.update_available);
         assert!(failed.error.is_some());
@@ -1911,11 +2187,12 @@ mod tests {
             Some("2.0.0".into()),
             "npm",
             Some("无法读取已安装版本".into()),
+            None,
         );
         assert!(!unknown.update_available);
         assert!(unknown.error.is_some());
         // 正常比对无错误。
-        let ok = make_update_info("pkg".into(), Some("1.0.0".into()), Some("1.1.0".into()), "npm", None);
+        let ok = make_update_info("pkg".into(), Some("1.0.0".into()), Some("1.1.0".into()), "npm", None, None);
         assert!(ok.update_available);
         assert!(ok.error.is_none());
     }
