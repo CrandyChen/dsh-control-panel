@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-control-panel"
-version = "2.4.4"
+version = "2.4.5"
 dependencies = [
  "chrono",
  "git2",
