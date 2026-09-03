@@ -522,6 +522,7 @@ fn plugin_profiles() -> Vec<String> {
 }
 
 /// 检测指定 profile 已安装第三方插件的更新（npm 查 registry 最新版，github 查最高 tag）。
+/// 结果同时写入全局状态并发出 `plugin-updates-checked` 事件（供前端徽标/列表同步）。
 #[tauri::command]
 async fn plugin_check_updates(app: AppHandle, profile: String) -> Result<plugin::PluginUpdates, String> {
     let cfg = config::load_config(&app);
@@ -529,9 +530,17 @@ async fn plugin_check_updates(app: AppHandle, profile: String) -> Result<plugin:
         .install_dir
         .clone()
         .ok_or_else(|| error::AppError::NotInstalled.friendly())?;
-    tauri::async_runtime::spawn_blocking(move || plugin::check_plugin_updates(&profile, &dir))
-        .await
-        .map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        plugin::check_plugin_updates(&profile, &dir)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // 同步全局状态并发出事件（与 auto_check_plugins 一致），使 ActionBar NEW 徽标即时刷新。
+    if let Some(state) = app.try_state::<AppState>() {
+        *state.plugin_updates.lock().unwrap() = Some(result.clone());
+    }
+    let _ = app.emit("plugin-updates-checked", &result);
+    Ok(result)
 }
 
 /// 智能解析输入并安装插件（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。

@@ -217,6 +217,8 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         if (r.ok) {
           setInput("");
           await loadList(profile);
+          // 刷新更新状态：清除刚更新/已卸载插件的「有更新」标记，并同步全局 NEW 徽标。
+          void checkUpdates(profile);
         }
         return r;
       } catch (e) {
@@ -235,7 +237,7 @@ export default function PluginManagerDialog({ open, config, webRunning, onClose,
         setBusy(false);
       }
     },
-    [loadList, profile, webRunning, t],
+    [checkUpdates, loadList, profile, webRunning, t],
   );
 
   /** 智能安装：输入由后端解析（npm 包名 / github 标识 / GitHub 链接 / 完整命令）。

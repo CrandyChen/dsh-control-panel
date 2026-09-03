@@ -228,6 +228,18 @@ fn catalog(key: &str) -> Option<(&'static str, &'static str)> {
             "当前已是最新版本",
             "Already up to date",
         ),
+        "update.cleanup_start" => (
+            "正在清理已更新的旧版本…",
+            "Cleaning up old kernel versions…",
+        ),
+        "update.cleanup_step" => (
+            "清理旧版本 {0}",
+            "Clean up old version {0}",
+        ),
+        "log.update_cleanup" => (
+            "🗑 清理旧版本 {0}（{1}）",
+            "🗑 Cleaning up old version {0} ({1})",
+        ),
         // ── 卸载预览扫描 ──
         "uninstall.scan.progress" => (
             "正在统计 {0}：{1} 项 / {2}",

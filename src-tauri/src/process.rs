@@ -109,10 +109,17 @@ pub fn spawn_any(
 }
 
 /// 串行执行步骤流水线；任一失败即中止并返回错误。
+///
+/// `emit_ui` 控制 stdout/stderr 是否逐行推送到前端日志框：
+/// - `true`（默认旧行为）：逐行发 `PipelineEvent::Output` 到前端；
+/// - `false`（源码安装/更新）：输出只写入当日日志文件（`logger.file_only`），
+///   仅把步骤起止（`StepStarted`/`StepFinished`）与错误推送到前端，达到“详细日志落盘、
+///   主界面只显示必要节点”的效果（与预构建内核安装一致）。
 pub fn run_pipeline(
     steps: &[Step],
     channel: &tauri::ipc::Channel<PipelineEvent>,
     logger: &Logger,
+    emit_ui: bool,
 ) -> Result<(), AppError> {
     for step in steps {
         let _ = channel.send(PipelineEvent::StepStarted {
@@ -143,29 +150,39 @@ pub fn run_pipeline(
         let stderr = child.stderr.take();
 
         let ch = channel.clone();
+        let lg = logger.clone();
         let sid = step.id.to_string();
         if let Some(out) = stdout {
             std::thread::spawn(move || {
                 for line in BufReader::new(out).lines().map_while(Result::ok) {
-                    let _ = ch.send(PipelineEvent::Output {
-                        step: sid.clone(),
-                        stream: "stdout".into(),
-                        line,
-                    });
+                    if emit_ui {
+                        let _ = ch.send(PipelineEvent::Output {
+                            step: sid.clone(),
+                            stream: "stdout".into(),
+                            line,
+                        });
+                    } else {
+                        lg.file_only("INFO", &line);
+                    }
                 }
             });
         }
 
         let ch = channel.clone();
+        let lg = logger.clone();
         let sid = step.id.to_string();
         if let Some(err) = stderr {
             std::thread::spawn(move || {
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    let _ = ch.send(PipelineEvent::Output {
-                        step: sid.clone(),
-                        stream: "stderr".into(),
-                        line,
-                    });
+                    if emit_ui {
+                        let _ = ch.send(PipelineEvent::Output {
+                            step: sid.clone(),
+                            stream: "stderr".into(),
+                            line,
+                        });
+                    } else {
+                        lg.file_only("WARN", &line);
+                    }
                 }
             });
         }

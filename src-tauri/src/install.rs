@@ -1,10 +1,10 @@
 //! 安装流程（双模式）。
 //!
-//! - **source（从官方源码安装）**：网络预检 → git clone（自动创建子目录）→ pnpm install →
-//!   pnpm run build。父目录固定为程序运行目录（exe 所在目录），clone 目标 =
-//!   `<程序运行目录>\<repo 目录名>`（默认 `deepseek-harness`）。依赖外部 git + 内置 node/pnpm。
+//! - **source（从官方源码安装）**：网络预检 → git clone（到 `<exe_dir>\dsh-src-<版本>`）→
+//!   `pnpm install`（保留 node_modules 增量）→ `pnpm run build`；源码更新在未保留旧版本时
+//!   走 `git fetch/reset` 就地更新 + 增量构建（见 `update_source_in_place`）。
 //! - **prebuilt（预构建内核，默认）**：GitHub 拉取最新
-//!   `deepseek-harness-pkg-windows.zip`，解压到程序运行目录下的 `dsh` 子目录。
+//!   `deepseek-harness-pkg-windows.zip`，解压到程序运行目录下的 `dsh-<版本>` 子目录。
 //!   不需要外部 git / pnpm / node。
 
 use tauri::ipc::Channel;
@@ -132,7 +132,8 @@ pub fn install_source_latest(
             envs: vec![],
         },
     ];
-    run_pipeline(&steps, channel, logger).map_err(|e| e.friendly())?;
+    // 源码安装/更新的详细输出仅落盘（与预构建一致：主界面只显示步骤节点，不刷屏）。
+    run_pipeline(&steps, channel, logger, false).map_err(|e| e.friendly())?;
 
     let mut cfg = config::load_config(app);
     cfg.install_dir = Some(target_str.clone());
@@ -166,6 +167,119 @@ fn register_source_kernel(cfg: &mut config::AppConfig, target: &std::path::Path,
         },
     );
     config::set_active_kernel(cfg, &id);
+}
+
+/// 源码内核**就地更新**（升级后不保留当前版本的场景）：在当前源码目录 `git fetch → reset`
+/// 到默认分支，保留 `node_modules` 做**增量** `pnpm install` + `pnpm run build`，完成后按
+/// 新版本号把目录改名为 `<exe_dir>\dsh-src-<新版本>`，更新注册表。
+///
+/// 相比「全新 clone + 全量安装」显著缩短构建时间；目录整体改名（含 `.git`）后 git 仍可用。
+pub fn update_source_in_place(
+    app: &AppHandle,
+    dir: &str,
+    channel: &Channel<PipelineEvent>,
+    logger: &Logger,
+) -> Result<(), String> {
+    crate::net::ensure_repo_reachable().map_err(|e| e.friendly())?;
+    crate::runtime::ensure_runtime(channel, logger)?;
+
+    let dir_buf = std::path::PathBuf::from(dir);
+    if !is_valid_repo(&dir_buf) {
+        return Err(AppError::NotInstalled.friendly());
+    }
+
+    // git 操作：fetch → reset 到 origin 默认分支（丢弃本地改动，与全新安装行为一致）。
+    let _ = channel.send(PipelineEvent::StepStarted {
+        id: "pull".into(),
+        title: crate::i18n::t("step.pull"),
+    });
+    let pull_result = (|| -> Result<(), String> {
+        crate::gitops::fetch(&dir_buf).map_err(|e| e.friendly())?;
+        let branch = crate::version::default_branch(&dir_buf).map_err(|e| e.friendly())?;
+        crate::gitops::reset_hard(&dir_buf, &format!("origin/{branch}"))
+            .map_err(|e| e.friendly())?;
+        Ok(())
+    })();
+    let _ = channel.send(PipelineEvent::StepFinished {
+        id: "pull".into(),
+        exit_code: pull_result.as_ref().map(|_| 0).unwrap_or(-1),
+    });
+    if let Err(msg) = pull_result {
+        return Err(format!("{msg}{}", crate::i18n::t("update.pull.hint")));
+    }
+
+    // 读取新版本，据此决定是否把目录改名。
+    let new_version = read_version(&dir_buf).unwrap_or_else(|| "unknown".to_string());
+    let target = config::source_install_dir(&new_version);
+    let target_str = target.to_string_lossy().to_string();
+    let work_dir = if target_str != dir {
+        // 目标目录若已是有效仓库（如另一版本源码内核）→ 报错（不应发生，update 侧已判重）。
+        if is_valid_repo(&target) {
+            return Err(AppError::AlreadyInstalled(target_str).friendly());
+        }
+        if target.exists() {
+            let _ = std::fs::remove_dir_all(&target);
+        }
+        std::fs::rename(&dir_buf, &target).map_err(|e| {
+            AppError::Io(format!("无法将源码目录改名为 {target_str}: {e}")).friendly()
+        })?;
+        target
+    } else {
+        dir_buf
+    };
+
+    // 增量安装依赖 + 构建（保留 node_modules；详细输出仅落盘，与预构建一致）。
+    let steps = vec![
+        Step {
+            id: "install",
+            title: "安装依赖（pnpm install）",
+            program: "pnpm.cmd",
+            args: vec!["install".into()],
+            cwd: Some(work_dir.clone()),
+            envs: vec![],
+        },
+        Step {
+            id: "build",
+            title: "构建（pnpm run build）",
+            program: "pnpm.cmd",
+            args: vec!["run".into(), "build".into()],
+            cwd: Some(work_dir.clone()),
+            envs: vec![],
+        },
+    ];
+    run_pipeline(&steps, channel, logger, false).map_err(|e| e.friendly())?;
+
+    // 更新注册表：移除该路径（原目录）对应的旧源码记录，登记新版本并设为活动内核。
+    let version = read_version(&work_dir).unwrap_or_else(|| new_version.clone());
+    let id = config::kernel_id("source", &version);
+    let work_str = work_dir.to_string_lossy().to_string();
+    let commit = read_commit(&work_dir);
+    let mut cfg = config::load_config(app);
+    cfg.installed_kernels.retain(|k| !(k.mode == "source" && k.install_dir == dir));
+    config::upsert_kernel(
+        &mut cfg,
+        config::KernelInstall {
+            id: id.clone(),
+            mode: "source".to_string(),
+            version: version.clone(),
+            install_dir: work_str.clone(),
+            commit: commit.clone(),
+            installed_at: config::now_string(),
+        },
+    );
+    config::set_active_kernel(&mut cfg, &id);
+    cfg.install_dir = Some(work_str.clone());
+    cfg.install_mode = "source".to_string();
+    cfg.installed_version = Some(version.clone());
+    cfg.installed_commit = commit;
+    cfg.last_updated_at = Some(config::now_string());
+    cfg.update_available = false;
+    cfg.latest_commit = None;
+    cfg.latest_subject = None;
+    config::save_config(app, &cfg).map_err(|e| e)?;
+
+    logger.info(&crate::i18n::t("log.update_done"));
+    Ok(())
 }
 
 /// 预构建内核安装：下载指定版本（或最新）release zip → 解压到该版本独立目录

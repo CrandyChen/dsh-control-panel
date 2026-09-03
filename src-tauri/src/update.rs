@@ -70,7 +70,20 @@ pub fn update(
         if !already_installed {
             if mode == "prebuilt" {
                 install_prebuilt_latest(app, channel, logger)?;
+            } else if !keep_current {
+                // 源码更新（升级后不保留）：就地 pull + 增量构建 + 改名，避免全新 clone + 全量安装。
+                // 取被选源码内核中版本最高者的目录就地更新。
+                let src_dir = selected_kernels
+                    .iter()
+                    .filter(|k| k.mode == "source")
+                    .max_by(|a, b| cmp_versions(&a.version, &b.version))
+                    .map(|k| k.install_dir.clone());
+                match src_dir {
+                    Some(d) => crate::install::update_source_in_place(app, &d, channel, logger)?,
+                    None => crate::install::install_source_latest(app, channel, logger)?,
+                }
             } else {
+                // 保留当前版本：需独立新目录（新克隆到 dsh-src-<新版本>）。
                 crate::install::install_source_latest(app, channel, logger)?;
             }
         }
@@ -78,6 +91,12 @@ pub fn update(
 
     // 默认（不保留）：删除被勾选的、版本与该方式最新版本不同的旧内核（目录 + 注册表）。
     if !keep_current {
+        // 先提示一次，让界面在删除大目录期间有反馈（避免长时间无进展的卡顿观感）。
+        let _ = channel.send(PipelineEvent::Output {
+            step: "cleanup".into(),
+            stream: "stdout".into(),
+            line: crate::i18n::t("update.cleanup_start"),
+        });
         let mut cfg2 = config::load_config(app);
         for k in &selected_kernels {
             let new_ver = target_versions
@@ -86,11 +105,24 @@ pub fn update(
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default();
             if k.version != new_ver {
+                let name = crate::uninstall::kernel_display_name(&k.mode, &k.version);
+                let _ = channel.send(PipelineEvent::StepStarted {
+                    id: "cleanup".into(),
+                    title: crate::i18n::t_fmt("update.cleanup_step", &[&name]),
+                });
                 let dir = PathBuf::from(&k.install_dir);
                 if dir.is_dir() {
+                    logger.file_only_info(&crate::i18n::t_fmt(
+                        "log.update_cleanup",
+                        &[&name, &k.install_dir],
+                    ));
                     let _ = std::fs::remove_dir_all(&dir);
                 }
                 config::remove_kernel(&mut cfg2, &k.id);
+                let _ = channel.send(PipelineEvent::StepFinished {
+                    id: "cleanup".into(),
+                    exit_code: 0,
+                });
             }
         }
         config::save_config(app, &cfg2).map_err(|e| e)?;
@@ -110,6 +142,14 @@ pub fn update(
     let _ = channel.send(PipelineEvent::Finished { ok: true });
     logger.info(&crate::i18n::t("log.update_done"));
     Ok(())
+}
+
+/// 语义化版本比较（优先 semver，解析失败退化为字典序）。用于挑选就地更新的源码目录。
+fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    }
 }
 
 /// 计算某安装方式的最新版本：预构建读最新 release 归一化版本；源码读已装源码目录的

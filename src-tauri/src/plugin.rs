@@ -1458,87 +1458,32 @@ fn version_from_package_json(text: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// 对 git 插件计算更新信息：返回 (最新版本, 是否有更新的覆盖值)。
+/// 计算 git 插件可更新到的最新版本号（与 `dsh plugin update` 一致，仅版本级）：
+/// - **Movable**（无 ref / 分支）：读该分支 HEAD 的 `package.json` 版本（内置 libgit2）；
+/// - **Tag**：该 tag 的语义化版本（去 `v`）；
+/// - **Commit**：固定提交，无更新。
 ///
-/// 与 `dsh plugin update` 一致：
-/// - **Movable**（无 ref / 分支）：读该分支 HEAD 的 `package.json` 版本，并将**已装提交**
-///   与 HEAD 提交比较（仓库可能改了提交而版本号未变，版本比较无法感知）；
-/// - **Tag**：该 tag 的语义化版本（去 `v`），由 version_less 判定；
-/// - **Commit**：固定提交，无更新（覆盖为 false）。
-fn git_dep_update(
-    spec: &str,
-    pdir: &Path,
-    key: &str,
-    current: Option<&str>,
-) -> (Option<String>, Option<bool>) {
-    let Some(repo) = github_repo_from_spec(spec) else {
-        return (None, None);
-    };
+/// 是否“有更新”由调用方用 `version_less(已装版本, 该值)` 判定（版本相同即视为已是最新，
+/// 不做提交级比较，避免“版本号未变但提交刷新”被误报为新版本）。
+fn git_dep_latest_version(spec: &str) -> Option<String> {
+    let repo = github_repo_from_spec(spec)?;
     let reference = git_ref_of_spec(spec);
     match classify_git_ref(reference.as_deref()) {
-        GitRefKind::Commit => (None, Some(false)),
-        GitRefKind::Tag => (reference.map(|r| r.trim_start_matches('v').to_string()), None),
+        GitRefKind::Commit => None,
+        GitRefKind::Tag => reference.map(|r| r.trim_start_matches('v').to_string()),
         GitRefKind::Movable => {
             let url = format!("https://github.com/{repo}");
             // 分支名则读该分支 HEAD；否则读默认分支 HEAD（内置 libgit2，不依赖系统 git）。
             let branch = reference.filter(|r| !is_commit_sha(r));
-            match crate::gitops::read_remote_file_with_head(
+            let text = crate::gitops::read_remote_file_with_head(
                 &url,
                 "package.json",
                 branch.as_deref(),
-            ) {
-                Ok((text, head_commit)) => {
-                    let latest_ver = version_from_package_json(&text);
-                    // 已装提交来自 pnpm-lock.yaml 的解析条目；能取到时按提交比较。
-                    let upd = match installed_git_commit(pdir, key) {
-                        Some(installed_commit) if !head_commit.is_empty() => {
-                            installed_commit != head_commit
-                        }
-                        // 取不到已装提交 / 无 HEAD 提交：回退版本比较。
-                        _ => match (current, latest_ver.as_deref()) {
-                            (Some(c), Some(l)) => version_less(c, l),
-                            _ => false,
-                        },
-                    };
-                    (latest_ver, Some(upd))
-                }
-                Err(_) => (None, None),
-            }
+            )
+            .ok()?
+            .0;
+            version_from_package_json(&text)
         }
-    }
-}
-
-/// 从 profile 的 pnpm-lock.yaml 解析某 git 插件已解析到的提交 SHA。
-/// pnpm-lock.yaml 的 packages 节中，git 依赖条目键形如 `<key>@https://…/tar.gz/<40hex>`。
-fn installed_git_commit(pdir: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(pdir.join("pnpm-lock.yaml")).ok()?;
-    text.lines()
-        .map(|l| l.trim())
-        .find_map(|l| {
-            if !l.starts_with(&format!("{key}@")) {
-                return None;
-            }
-            extract_tar_gz_sha(l)
-        })
-}
-
-/// 从字符串中 `tar.gz/` 之后提取提交 SHA（最多 40 位 hex）。
-fn extract_tar_gz_sha(s: &str) -> Option<String> {
-    let marker = "tar.gz/";
-    let idx = s.rfind(marker)? + marker.len();
-    let rest = &s[idx..];
-    let mut sha = String::new();
-    for c in rest.chars() {
-        if c.is_ascii_hexdigit() && sha.len() < 40 {
-            sha.push(c);
-        } else {
-            break;
-        }
-    }
-    if sha.len() >= 7 {
-        Some(sha)
-    } else {
-        None
     }
 }
 
@@ -1653,12 +1598,11 @@ fn make_update_info(
     latest: Option<String>,
     source: &str,
     error: Option<String>,
-    update_override: Option<bool>,
 ) -> PluginUpdateInfo {
-    let update_available = update_override.unwrap_or_else(|| match (&current, &latest) {
+    let update_available = match (&current, &latest) {
         (Some(c), Some(l)) => version_less(c, l),
         _ => false,
-    });
+    };
     PluginUpdateInfo {
         key,
         current_version: current,
@@ -1687,14 +1631,7 @@ pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUp
     for e in &list.entries {
         if is_tarball_url(&e.spec) {
             // 固定压缩包（.tar.gz / .tgz / /archive/）：不可更新，不误报。
-            entries.push(make_update_info(
-                e.key.clone(),
-                e.version.clone(),
-                None,
-                "github",
-                None,
-                Some(false),
-            ));
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), None, "github", None));
         } else if is_npm_spec(&e.spec) {
             let latest = query_latest_npm_for_spec(&e.key, &e.spec, cwd);
             let error = match (&e.version, &latest) {
@@ -1702,38 +1639,17 @@ pub fn check_plugin_updates(profile: &str, install_dir: &str) -> Result<PluginUp
                 (Some(_), None) => Some(crate::i18n::t("plugin.updates.query_failed")),
                 _ => None,
             };
-            entries.push(make_update_info(
-                e.key.clone(),
-                e.version.clone(),
-                latest,
-                "npm",
-                error,
-                None,
-            ));
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "npm", error));
         } else if github_repo_from_spec(&e.spec).is_some() {
-            let (latest, upd) = git_dep_update(&e.spec, &pdir, &e.key, e.version.as_deref());
+            let latest = git_dep_latest_version(&e.spec);
             let error = match (&e.version, &latest) {
                 (None, Some(_)) => Some(crate::i18n::t("plugin.updates.current_unknown")),
                 (Some(_), None) => Some(crate::i18n::t("plugin.updates.query_failed")),
                 _ => None,
             };
-            entries.push(make_update_info(
-                e.key.clone(),
-                e.version.clone(),
-                latest,
-                "github",
-                error,
-                upd,
-            ));
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), latest, "github", error));
         } else {
-            entries.push(make_update_info(
-                e.key.clone(),
-                e.version.clone(),
-                None,
-                "unknown",
-                None,
-                None,
-            ));
+            entries.push(make_update_info(e.key.clone(), e.version.clone(), None, "unknown", None));
         }
     }
     Ok(PluginUpdates {
@@ -2092,51 +2008,19 @@ mod tests {
     }
 
     #[test]
-    fn git_dep_update_handles_tag_and_commit() {
-        let pdir = Path::new("");
-        // Tag：取去 v 的语义化版本；无更新覆盖 → 由 version_less 判定。
-        let (latest, upd) = git_dep_update("github:omdsh-dev/dsh-better-sidebar#v0.6.3", pdir, "k", None);
-        assert_eq!(latest.as_deref(), Some("0.6.3"));
-        assert_eq!(upd, None);
-        // Commit：固定提交，无更新（覆盖为 false）。
-        let (latest, upd) = git_dep_update(
-            "github:omdsh-dev/dsh-better-sidebar#ad392ceea4cdbe545d99ddd3730b4cc62036bd44",
-            pdir,
-            "k",
-            None,
-        );
-        assert_eq!(latest, None);
-        assert_eq!(upd, Some(false));
-    }
-
-    #[test]
-    fn extract_tar_gz_sha_parses_commit() {
+    fn git_dep_latest_version_handles_tag_and_commit() {
+        // Tag：取去 v 的语义化版本。
         assert_eq!(
-            extract_tar_gz_sha(
-                "dsh-better-sidebar@https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/ad392ceea4cdbe545d99ddd3730b4cc62036bd44:"
-            )
-            .as_deref(),
-            Some("ad392ceea4cdbe545d99ddd3730b4cc62036bd44")
+            git_dep_latest_version("github:omdsh-dev/dsh-better-sidebar#v0.6.3").as_deref(),
+            Some("0.6.3")
         );
-        assert_eq!(extract_tar_gz_sha("no marker here"), None);
-    }
-
-    #[test]
-    fn installed_git_commit_parses_lockfile() {
-        let dir = tmp_dir("lockfile");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("pnpm-lock.yaml"),
-            "importers:\n  .:\n    dependencies:\n      dsh-better-sidebar:\n        specifier: github:omdsh-dev/dsh-better-sidebar\n        version: https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/ad392ceea4cdbe545d99ddd3730b4cc62036bd44\npackages:\n  dsh-better-sidebar@https://codeload.github.com/omdsh-dev/dsh-better-sidebar/tar.gz/ad392ceea4cdbe545d99ddd3730b4cc62036bd44:\n    version: 0.19.0-alpha.0\n",
-        )
-        .unwrap();
+        // Commit：固定提交，无更新。
         assert_eq!(
-            installed_git_commit(&dir, "dsh-better-sidebar").as_deref(),
-            Some("ad392ceea4cdbe545d99ddd3730b4cc62036bd44")
+            git_dep_latest_version(
+                "github:omdsh-dev/dsh-better-sidebar#ad392ceea4cdbe545d99ddd3730b4cc62036bd44"
+            ),
+            None
         );
-        // 其它 key 不命中。
-        assert_eq!(installed_git_commit(&dir, "other-plugin"), None);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2176,7 +2060,6 @@ mod tests {
             None,
             "npm",
             Some("查询失败".into()),
-            None,
         );
         assert!(!failed.update_available);
         assert!(failed.error.is_some());
@@ -2187,12 +2070,11 @@ mod tests {
             Some("2.0.0".into()),
             "npm",
             Some("无法读取已安装版本".into()),
-            None,
         );
         assert!(!unknown.update_available);
         assert!(unknown.error.is_some());
         // 正常比对无错误。
-        let ok = make_update_info("pkg".into(), Some("1.0.0".into()), Some("1.1.0".into()), "npm", None, None);
+        let ok = make_update_info("pkg".into(), Some("1.0.0".into()), Some("1.1.0".into()), "npm", None);
         assert!(ok.update_available);
         assert!(ok.error.is_none());
     }
