@@ -28,7 +28,7 @@ The program has built-in Git client support; Node.js and pnpm are downloaded aut
 
 ## Installing DeepSeek Harness (two modes, multiple versions)
 
-The install location is fixed to the control panel's own directory. Prebuilt kernels are extracted into a `dsh-<version>` subdirectory per version (independent, can coexist); a source install is cloned into a `dsh-src-<version>` subdirectory per version (independent, can coexist). On startup the program detects any DSH installation in this directory (including the legacy `deepseek-harness` and `dsh` directories) and automatically adopts one if already present.
+The install location is fixed to the control panel's own directory. Prebuilt kernels are extracted into a `dsh-<version>` subdirectory per version (independent, can coexist); a source install is cloned into a `dsh-src-<version>` subdirectory per version (independent, can coexist). On startup the program detects any DSH installation in this directory  and automatically adopts one if already present.
 
 Click "Install" and choose an install mode:
 
@@ -70,7 +70,7 @@ Main UI
 Startup Choice
  ![Startup Choice](assets/startup-en.png)
  
-Web page
+DSH Web UI
  ![Web page](assets/web-en.png)
 
 Plugin Management

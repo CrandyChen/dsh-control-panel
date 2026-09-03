@@ -29,7 +29,7 @@ DSH Control Panel 把 DeepSeek Harness 常用的**安装**、**更新**、**卸�
 
 ## 安装 DeepSeek Harness（两种方式、多版本）
 
-安装位置固定为程序所在目录。预构建内核按版本解压到 `dsh-<版本>` 子目录（各版本独立）；源码安装按版本克隆到 `dsh-src-<版本>` 子目录（各版本独立）。程序启动时检测本目录下的 DSH 安装情况（含旧版 `deepseek-harness`、`dsh` 目录），发现已有安装会自动关联。
+安装位置固定为程序所在目录。预构建内核按版本解压到 `dsh-<版本>` 子目录（各版本独立）；源码安装按版本克隆到 `dsh-src-<版本>` 子目录（各版本独立）。程序启动时检测本目录下的 DSH 安装情况，发现已有安装会自动关联。
 
 点击「安装」后选择安装方式：
 
@@ -67,7 +67,11 @@ DSH Control Panel 把 DeepSeek Harness 常用的**安装**、**更新**、**卸�
 
 主界面
  ![主界面](assets/main.png)
+ 
+ 启动选择
  ![启动选择](assets/startup.png)
+ 
+ DSH Web页面
  ![web页面](assets/web.png)
 
 插件管理
