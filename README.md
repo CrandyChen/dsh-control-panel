@@ -67,6 +67,7 @@ DSH Control Panel 把 DeepSeek Harness 常用的**安装**、**更新**、**卸�
 
 主界面
  ![主界面](assets/main.png)
+ ![启动选择](assets/startup.png)
  ![web页面](assets/web.png)
 
 插件管理

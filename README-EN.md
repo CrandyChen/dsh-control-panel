@@ -66,7 +66,10 @@ Click "Install" and choose an install mode:
 
 Main UI
  ![Main UI](assets/main-en.png)
-
+ 
+Startup Choice
+ ![Startup Choice](assets/startup-en.png)
+ 
 Web page
  ![Web page](assets/web-en.png)
 
