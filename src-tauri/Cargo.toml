@@ -1,6 +1,6 @@
 [package]
 name = "dsh-control-panel"
-version = "2.4.5"
+version = "2.4.6"
 description = "DSH Control Panel — install, update, launch and maintain DeepSeek Harness"
 authors = ["DSH Control Panel"]
 edition = "2021"
