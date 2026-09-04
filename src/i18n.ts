@@ -109,7 +109,7 @@ const zh: Dict = {
   "update.steps.prebuilt":
     "更新将依次执行：下载最新预构建内核 → 解压替换到安装目录；更新期间请勿关闭本窗口。",
   "update.count": "{0} 个",
-  "update.keepCurrent.label": "升级后保留当前版本（不删除勾选的旧版本）",
+  "update.replaceHint": "更新后，勾选版本对应的旧内核将被替换（旧版本目录将被删除）。",
   "update.selectHint":
     "勾选要更新的内核（可跨安装方式多选）；同一安装方式勾选多个版本时仅安装该方式的最新版本。",
   "update.col.mode": "安装方式",
@@ -452,7 +452,7 @@ const en: Dict = {
   "update.steps.prebuilt":
     "The update runs: download the latest prebuilt kernel → extract and replace the install directory; do not close this window during the update.",
   "update.count": "{0}",
-  "update.keepCurrent.label": "Keep current version after update (do not delete selected old versions)",
+  "update.replaceHint": "After updating, the old kernels corresponding to the selected versions will be replaced (their directories will be removed).",
   "update.selectHint":
     "Select the kernel(s) to update (you can select across install modes). Selecting multiple versions of the same mode installs only that mode's latest version.",
   "update.col.mode": "Install mode",
