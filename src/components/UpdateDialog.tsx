@@ -1,9 +1,9 @@
 // 更新详情对话框：以简洁列表列出所有已安装内核（安装方式 / 当前版本 / 新版本），
-// 由用户勾选要更新的内核（可跨安装方式多选），并可勾选「升级后保留当前版本」。
+// 由用户勾选要更新的内核（可跨安装方式多选）；更新后勾选版本的旧内核将被替换。
 // web 服务运行中时提示更新前会自动停止。
 
 import { CloudSyncOutlined } from "@ant-design/icons";
-import { Alert, Button, Checkbox, Flex, Modal, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Flex, Modal, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 import { useState } from "react";
 import { useI18n } from "../i18n";
@@ -16,8 +16,8 @@ interface Props {
   /** 是否正在执行更新（对话框保持打开并显示进度提示）。 */
   updating: boolean;
   onIgnore: () => void;
-  /** 更新：勾选的内核 id 列表 + 是否保留当前版本。 */
-  onUpdate: (selectedIds: string[], keepCurrent: boolean) => void;
+  /** 更新：勾选的内核 id 列表。更新后旧版本内核会被替换/删除。 */
+  onUpdate: (selectedIds: string[]) => void;
 }
 
 export default function UpdateDialog({
@@ -32,7 +32,6 @@ export default function UpdateDialog({
   // 默认勾选有更新的内核（已是最新/查询失败的行不可勾选）。
   const defaultSelected = rows.filter((r) => r.updateAvailable).map((r) => r.id);
   const [selected, setSelected] = useState<string[]>(defaultSelected);
-  const [keepCurrent, setKeepCurrent] = useState(false);
 
   const modeLabel = (mode: string) =>
     mode === "source" ? t("status.mode.source") : t("status.mode.prebuilt");
@@ -75,7 +74,7 @@ export default function UpdateDialog({
     const ids = rows
       .filter((r) => r.updateAvailable && selected.includes(r.id))
       .map((r) => r.id);
-    onUpdate(ids, keepCurrent);
+    onUpdate(ids);
   };
 
   return (
@@ -127,13 +126,9 @@ export default function UpdateDialog({
           rowSelection={rowSelection}
           scroll={{ y: 260 }}
         />
-        <Checkbox
-          checked={keepCurrent}
-          disabled={updating}
-          onChange={(e) => setKeepCurrent(e.target.checked)}
-        >
-          {t("update.keepCurrent.label")}
-        </Checkbox>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {t("update.replaceHint")}
+        </Typography.Text>
       </Space>
     </Modal>
   );
