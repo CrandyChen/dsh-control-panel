@@ -83,43 +83,41 @@ pub fn update(
     }
 
     // 删除被勾选的、版本与该方式最新版本不同的旧内核（目录 + 注册表）。
-    {
-        // 先提示一次，让界面在删除大目录期间有反馈（避免长时间无进展的卡顿观感）。
-        let _ = channel.send(PipelineEvent::Output {
-            step: "cleanup".into(),
-            stream: "stdout".into(),
-            line: crate::i18n::t("update.cleanup_start"),
-        });
-        let mut cfg2 = config::load_config(app);
-        for k in &selected_kernels {
-            let new_ver = target_versions
-                .iter()
-                .find(|(m, _)| m == &k.mode)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default();
-            if k.version != new_ver {
-                let name = crate::uninstall::kernel_display_name(&k.mode, &k.version);
-                let _ = channel.send(PipelineEvent::StepStarted {
-                    id: "cleanup".into(),
-                    title: crate::i18n::t_fmt("update.cleanup_step", &[&name]),
-                });
-                let dir = PathBuf::from(&k.install_dir);
-                if dir.is_dir() {
-                    logger.file_only_info(&crate::i18n::t_fmt(
-                        "log.update_cleanup",
-                        &[&name, &k.install_dir],
-                    ));
-                    let _ = std::fs::remove_dir_all(&dir);
-                }
-                config::remove_kernel(&mut cfg2, &k.id);
-                let _ = channel.send(PipelineEvent::StepFinished {
-                    id: "cleanup".into(),
-                    exit_code: 0,
-                });
+    // 先提示一次，让界面在删除大目录期间有反馈（避免长时间无进展的卡顿观感）。
+    let _ = channel.send(PipelineEvent::Output {
+        step: "cleanup".into(),
+        stream: "stdout".into(),
+        line: crate::i18n::t("update.cleanup_start"),
+    });
+    let mut cfg2 = config::load_config(app);
+    for k in &selected_kernels {
+        let new_ver = target_versions
+            .iter()
+            .find(|(m, _)| m == &k.mode)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        if k.version != new_ver {
+            let name = crate::uninstall::kernel_display_name(&k.mode, &k.version);
+            let _ = channel.send(PipelineEvent::StepStarted {
+                id: "cleanup".into(),
+                title: crate::i18n::t_fmt("update.cleanup_step", &[&name]),
+            });
+            let dir = PathBuf::from(&k.install_dir);
+            if dir.is_dir() {
+                logger.file_only_info(&crate::i18n::t_fmt(
+                    "log.update_cleanup",
+                    &[&name, &k.install_dir],
+                ));
+                let _ = std::fs::remove_dir_all(&dir);
             }
+            config::remove_kernel(&mut cfg2, &k.id);
+            let _ = channel.send(PipelineEvent::StepFinished {
+                id: "cleanup".into(),
+                exit_code: 0,
+            });
         }
-        config::save_config(app, &cfg2).map_err(|e| e)?;
     }
+    config::save_config(app, &cfg2).map_err(|e| e)?;
 
     // 设定活动内核为已装内核中版本最高者，并清除更新标记。
     let mut cfg3 = config::load_config(app);
