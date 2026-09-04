@@ -34,8 +34,8 @@ interface Props {
   onStart: () => void;
   onOpenUi: () => void;
   onStop: () => void;
-  /** 更新：选中内核 id 列表 + 是否保留当前版本。 */
-  onUpdate: (selectedIds: string[], keepCurrent: boolean) => void;
+  /** 更新：选中内核 id 列表。 */
+  onUpdate: (selectedIds: string[]) => void;
   /** 检测新版本：返回结果（失败为 null）；有新版时由本组件弹详情对话框。 */
   onCheck: () => Promise<UpdateCheckResult | null>;
   onTerminal: () => void;
@@ -235,9 +235,9 @@ export default function ActionBar({
           webRunning={running}
           updating={phase === "updating"}
           onIgnore={() => setUpdateResult(null)}
-          onUpdate={(sel, keep) => {
+          onUpdate={(sel) => {
             setUpdateResult(null);
-            onUpdate(sel, keep);
+            onUpdate(sel);
           }}
         />
       )}
