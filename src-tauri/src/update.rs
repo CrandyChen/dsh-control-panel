@@ -1,11 +1,8 @@
 //! 更新流程（多内核）。
 //!
 //! 更新对话框列出所有已安装内核（安装方式 / 当前版本 / 新版本），用户勾选要更新的内核
-//! （可跨安装方式多选），并可选「升级后保留当前版本」：
-//!
-//! - **不勾选保留**（默认）：安装该方式最新内核后，删除被勾选的旧版本内核；
-//! - **勾选保留**：只新装最新内核，保留所有被勾选的当前版本；
-//! - 同一种安装方式下勾选多个版本时，**只安装**该方式的一个最新内核。
+//! （可跨安装方式多选）。更新后**删除**被勾选的旧版本内核（替换为新版本内核）；
+//! 同一种安装方式下勾选多个版本时，**只安装**该方式的一个最新内核。
 //!
 //! 支持预构建与源码同时更新：
 //! - **prebuilt**：下载最新 `deepseek-harness-pkg-windows.zip` → 解压到 `dsh-<version>`；
@@ -24,11 +21,10 @@ use crate::process::PipelineEvent;
 /// 更新已安装的 DeepSeek Harness 内核。
 ///
 /// `selected` 为要更新的内核 id 列表（来自注册表，可跨安装方式多选）；
-/// `keep_current` 为「升级后是否同时保留当前版本」（默认 false：删除被勾选的旧版本）。
+/// 更新完成后删除被勾选的、版本不等于该方式最新版本的旧内核。
 pub fn update(
     app: &AppHandle,
     selected: Vec<String>,
-    keep_current: bool,
     channel: &Channel<PipelineEvent>,
     logger: &Logger,
 ) -> Result<(), String> {
@@ -70,8 +66,8 @@ pub fn update(
         if !already_installed {
             if mode == "prebuilt" {
                 install_prebuilt_latest(app, channel, logger)?;
-            } else if !keep_current {
-                // 源码更新（升级后不保留）：就地 pull + 增量构建 + 改名，避免全新 clone + 全量安装。
+            } else {
+                // 源码更新：就地 pull + 增量构建 + 改名，避免全新 clone + 全量安装。
                 // 取被选源码内核中版本最高者的目录就地更新。
                 let src_dir = selected_kernels
                     .iter()
@@ -82,15 +78,12 @@ pub fn update(
                     Some(d) => crate::install::update_source_in_place(app, &d, channel, logger)?,
                     None => crate::install::install_source_latest(app, channel, logger)?,
                 }
-            } else {
-                // 保留当前版本：需独立新目录（新克隆到 dsh-src-<新版本>）。
-                crate::install::install_source_latest(app, channel, logger)?;
             }
         }
     }
 
-    // 默认（不保留）：删除被勾选的、版本与该方式最新版本不同的旧内核（目录 + 注册表）。
-    if !keep_current {
+    // 删除被勾选的、版本与该方式最新版本不同的旧内核（目录 + 注册表）。
+    {
         // 先提示一次，让界面在删除大目录期间有反馈（避免长时间无进展的卡顿观感）。
         let _ = channel.send(PipelineEvent::Output {
             step: "cleanup".into(),

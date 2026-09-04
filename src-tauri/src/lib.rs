@@ -200,12 +200,11 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> 
 async fn update(
     app: AppHandle,
     selected: Vec<String>,
-    keep_current: bool,
     channel: Channel<PipelineEvent>,
 ) -> Result<(), String> {
     let logger = app.state::<AppState>().logger.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        update::update(&app, selected, keep_current, &channel, &logger)
+        update::update(&app, selected, &channel, &logger)
     })
     .await
     .map_err(|e| e.to_string())?

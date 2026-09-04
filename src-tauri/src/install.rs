@@ -169,7 +169,7 @@ fn register_source_kernel(cfg: &mut config::AppConfig, target: &std::path::Path,
     config::set_active_kernel(cfg, &id);
 }
 
-/// 源码内核**就地更新**（升级后不保留当前版本的场景）：在当前源码目录 `git fetch → reset`
+/// 源码内核**就地更新**：在当前源码目录 `git fetch → reset`
 /// 到默认分支，保留 `node_modules` 做**增量** `pnpm install` + `pnpm run build`，完成后按
 /// 新版本号把目录改名为 `<exe_dir>\dsh-src-<新版本>`，更新注册表。
 ///
