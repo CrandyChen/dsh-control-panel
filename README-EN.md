@@ -46,7 +46,7 @@ Click "Install" and choose an install mode:
 - Checks for updates according to your install mode: the prebuilt kernel compares against the latest release of [deepseek-harness-pkg](https://github.com/dsh-tauri-desk/deepseek-harness-pkg); the source mode compares against the CLI version on the official source repository.
 - An automatic background check shows a red **NEW** badge on the Update button when a new version is found; the web service is stopped automatically before updating.
 - Clicking "Update" opens a dialog that lists every installed kernel in a simple table (install mode / current version / new version) and lets you select which kernels to update (you can select across install modes). Selecting multiple versions of the same install mode only installs that mode's latest version.
-- The dialog notes that, after updating, the old kernels corresponding to the selected versions will be replaced (their directories will be removed). The updated new kernel is installed as an independent kernel and becomes the current one; unselected versions can still be switched to or uninstalled.
+- The old kernels corresponding to the selected versions will be replaced (their directories will be removed). 
 
 ### 3. DSH Repair Installation
 - Repairs a specific kernel version: cleans up abnormal state and rebuilds. The source mode runs a git reset + rebuild; the prebuilt mode re-downloads and re-extracts that version's kernel.
